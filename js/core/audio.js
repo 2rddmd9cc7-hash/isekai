@@ -39,9 +39,11 @@ export class AudioEngine {
       comp.threshold.value = -16; comp.knee.value = 20; comp.ratio.value = 5;
       comp.attack.value = 0.004; comp.release.value = 0.22; comp.connect(master);
       this.master = master;
-      this.musicGain = ctx.createGain(); this.musicGain.gain.value = 0; this.musicGain.connect(comp);
-      this.sfxGain = ctx.createGain(); this.sfxGain.gain.value = 0.8; this.sfxGain.connect(comp);
-      this.ambGain = ctx.createGain(); this.ambGain.gain.value = 0.75; this.ambGain.connect(comp);
+      // Music starts at a low, warm level — the old 0-gain start meant the
+      // scheduler stayed silent until a mode change, then jumped in loudly.
+      this.musicGain = ctx.createGain(); this.musicGain.gain.value = 0.30; this.musicGain.connect(comp);
+      this.sfxGain = ctx.createGain(); this.sfxGain.gain.value = 0.56; this.sfxGain.connect(comp);
+      this.ambGain = ctx.createGain(); this.ambGain.gain.value = 0.55; this.ambGain.connect(comp);
       // noise buffer
       const len = ctx.sampleRate * 2;
       const buf = ctx.createBuffer(1, len, ctx.sampleRate);
@@ -51,7 +53,11 @@ export class AudioEngine {
       this.startAmbience();
       this.startMusic();
       this.ready = true;
+      this.setMusicMode('explore', true);
       if (ctx.state === 'suspended') ctx.resume();
+      ctx.addEventListener && ctx.addEventListener('statechange', () => {
+        if (ctx.state === 'suspended' && this.ready && !this.muted) ctx.resume().catch(() => {});
+      });
     } catch (e) { console.warn('Audio unavailable', e); }
   }
 
@@ -67,26 +73,25 @@ export class AudioEngine {
   /* ---------------- ambience ---------------- */
   startAmbience() {
     const ctx = this.ctx;
-    // wind: filtered looped noise
+    // ---- wind: two very soft low-passed noise beds (no resonant saw edge)
     const src = ctx.createBufferSource(); src.buffer = this.noiseBuf; src.loop = true;
-    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 420; lp.Q.value = 0.8;
-    const gain = this.windGain = ctx.createGain(); gain.gain.value = 0.055;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 260; lp.Q.value = 0.55;
+    const gain = this.windGain = ctx.createGain(); gain.gain.value = 0.028;
     src.connect(lp); lp.connect(gain); gain.connect(this.ambGain); src.start();
-    // slow swell
-    const lfo = ctx.createOscillator(); lfo.frequency.value = 0.07;
-    const lg = ctx.createGain(); lg.gain.value = 0.03; lfo.connect(lg); lg.connect(gain.gain); lfo.start();
-    // water layer
+    const lfo = ctx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 0.06;
+    const lg = ctx.createGain(); lg.gain.value = 0.012; lfo.connect(lg); lg.connect(gain.gain); lfo.start();
+
+    // ---- water: rounded band-pass noise, opens only near rivers/lakes
     const wsrc = ctx.createBufferSource(); wsrc.buffer = this.noiseBuf; wsrc.loop = true;
-    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1200; bp.Q.value = 0.5;
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 760; bp.Q.value = 0.7;
     const wg = this.waterGain = ctx.createGain(); wg.gain.value = 0;
     wsrc.connect(bp); bp.connect(wg); wg.connect(this.ambGain); wsrc.start();
-    const lfo2 = ctx.createOscillator(); lfo2.frequency.value = 0.9;
-    const lg2 = ctx.createGain(); lg2.gain.value = 0.5; lfo2.connect(lg2); lg2.connect(wg.gain); lfo2.start();
-    // fire layer
+
+    // ---- fire: warm low crackle instead of a harsh hiss
     const fsrc = ctx.createBufferSource(); fsrc.buffer = this.noiseBuf; fsrc.loop = true;
-    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 2200;
+    const fp = ctx.createBiquadFilter(); fp.type = 'lowpass'; fp.frequency.value = 520; fp.Q.value = 0.5;
     const fg = this.fireGain = ctx.createGain(); fg.gain.value = 0;
-    fsrc.connect(hp); hp.connect(fg); fg.connect(this.ambGain); fsrc.start();
+    fsrc.connect(fp); fp.connect(fg); fg.connect(this.ambGain); fsrc.start();
   }
 
   startMusic() {
@@ -95,15 +100,16 @@ export class AudioEngine {
     this.musicTimer = setInterval(() => this.scheduleMusic(), 140);
   }
 
-  setMusicMode(mode) {
-    if (this.mode === mode) return;
+  setMusicMode(mode, force = false) {
+    if (this.mode === mode && !force) return;
     this.mode = mode;
-    this.bpm = mode === 'boss' ? 150 : mode === 'combat' ? 128 : mode === 'victory' ? 92 : 76;
+    this.bpm = mode === 'boss' ? 142 : mode === 'combat' ? 120 : mode === 'victory' ? 88 : 72;
     this.step = 0;
     if (this.ctx) this.nextTime = Math.max(this.nextTime, this.t + 0.25);
     if (this.musicGain && this.ctx) {
+      const level = mode === 'none' ? 0 : mode === 'boss' ? 0.34 : mode === 'combat' ? 0.28 : 0.22;
       this.musicGain.gain.cancelScheduledValues(this.t);
-      this.musicGain.gain.setTargetAtTime(mode === 'none' ? 0 : 0.5, this.t, 0.9);
+      this.musicGain.gain.setTargetAtTime(level, this.t, 0.9);
     }
   }
 
@@ -149,7 +155,7 @@ export class AudioEngine {
       }
     } else {
       const pat = boss ? [0, 4, 2, 4, 6, 4, 2, 1] : [0, 2, 4, 2, 5, 4, 2, 3];
-      if (s % 2 === 0) this.pluck(MIDI(root + 12 + scale[pat[(step / 2) % 8 | 0] % 7]), t, 0.2, boss ? 0.1 : 0.07, 'square');
+      if (s % 2 === 0) this.pluck(MIDI(root + 12 + scale[pat[(step / 2) % 8 | 0] % 7]), t, 0.2, boss ? 0.085 : 0.06, 'triangle');
     }
     // percussion
     if (combat) {
@@ -169,13 +175,15 @@ export class AudioEngine {
     const f = MIDI(midi);
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, t);
-    g.gain.linearRampToValueAtTime(vol, t + 0.5);
-    g.gain.linearRampToValueAtTime(vol * 0.7, t + dur * 0.6);
+    g.gain.linearRampToValueAtTime(vol * 0.55, t + 0.55);
+    g.gain.linearRampToValueAtTime(vol * 0.42, t + dur * 0.6);
     g.gain.linearRampToValueAtTime(0, t + dur);
-    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900; lp.Q.value = 0.4;
-    for (const det of [-4, 4]) {
-      const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f; o.detune.value = det;
-      o.connect(lp); o.start(t); o.stop(t + dur + 0.1);
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1250; lp.Q.value = 0.2;
+    // triangle + sine only: no detuned sawtooth "sawing" artefact
+    for (const [type, det, level] of [['triangle', -3, 1], ['sine', 4, 0.7]]) {
+      const o = ctx.createOscillator(); o.type = type; o.frequency.value = f; o.detune.value = det;
+      const og = ctx.createGain(); og.gain.value = level;
+      o.connect(og); og.connect(lp); o.start(t); o.stop(t + dur + 0.1);
     }
     lp.connect(g); g.connect(this.musicGain);
   }
@@ -192,11 +200,11 @@ export class AudioEngine {
   }
   brass(midi, t, dur) {
     const ctx = this.ctx;
-    const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = MIDI(midi);
-    const o2 = ctx.createOscillator(); o2.type = 'sawtooth'; o2.frequency.value = MIDI(midi) * 1.005;
-    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 520; lp.Q.value = 2;
+    const o = ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = MIDI(midi);
+    const o2 = ctx.createOscillator(); o2.type = 'sine'; o2.frequency.value = MIDI(midi) * 1.005;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 640; lp.Q.value = 0.7;
     const g = ctx.createGain();
-    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.12, t + 0.05);
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.09, t + 0.06);
     g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
     o.connect(lp); o2.connect(lp); lp.connect(g); g.connect(this.musicGain);
     o.start(t); o.stop(t + dur); o2.start(t); o2.stop(t + dur);
@@ -314,9 +322,9 @@ export class AudioEngine {
         this.noise(t, 0.09, 0.16, 'highpass', 2400, 0.8);
         break;
       case 'crit':
-        this.tone(t, 180, 0.2, 0.22, 'square', 70);
-        this.noise(t, 0.14, 0.22, 'highpass', 3200, 0.7);
-        this.tone(t + 0.02, 1300, 0.2, 0.09, 'triangle', 700);
+        this.tone(t, 150, 0.2, 0.18, 'triangle', 60);
+        this.noise(t, 0.14, 0.16, 'bandpass', 2400, 0.9);
+        this.tone(t + 0.02, 1200, 0.2, 0.07, 'triangle', 700);
         break;
       case 'stepGrass': this.noise(t, 0.1, 0.075, 'lowpass', 620 + rand(-80, 80), .6); break;
       case 'stepStone': this.noise(t, 0.07, 0.1, 'bandpass', 1800 + rand(-300, 300), 1.8); break;
@@ -325,20 +333,29 @@ export class AudioEngine {
       case 'jump': this.noise(t, 0.18, 0.08, 'bandpass', 700, 1); this.tone(t, 300, 0.12, 0.04, 'sine', 480); break;
       case 'land': this.tone(t, 90, 0.16, 0.16, 'triangle', 45); this.noise(t, 0.1, 0.1, 'lowpass', 500); break;
       case 'dodge': this.noise(t, 0.26, 0.14, 'bandpass', 600, 0.8); this.tone(t, 200, 0.2, 0.04, 'sine', 480); break;
-      case 'fireCharge': this.noise(t, 0.6, 0.08, 'bandpass', 400, 1.2); this.tone(t, 140, 0.55, 0.06, 'sawtooth', 420); break;
-      case 'fireCast':
-        this.noise(t, 0.3, 0.16, 'bandpass', 800, 0.7);
-        this.tone(t, 300, 0.25, 0.08, 'sawtooth', 700);
+      case 'fireCharge':
+        this.noise(t, 0.55, 0.035, 'lowpass', 520, 0.7);
+        this.tone(t, 160, 0.5, 0.035, 'triangle', 340);
         break;
+      case 'fireCast':
+        this.noise(t, 0.3, 0.13, 'bandpass', 780, 0.7);
+        this.tone(t, 320, 0.25, 0.06, 'triangle', 620);
+        break;
+      case 'castFire': this.noise(t, 0.3, 0.12, 'bandpass', 820, .8); this.tone(t, 280, 0.3, 0.05, 'triangle', 560); break;
+      case 'castIce': this.tone(t, 1250, 0.3, 0.05, 'sine', 760); this.noise(t, 0.24, 0.05, 'bandpass', 3200, 0.9); break;
+      case 'castBolt': this.noise(t, 0.22, 0.11, 'bandpass', 2600, 0.8); this.tone(t, 1500, 0.18, 0.05, 'triangle', 420); break;
+      case 'castWind': this.noise(t, 0.36, 0.09, 'bandpass', 900, .5); this.tone(t, 420, 0.3, 0.035, 'sine', 620); break;
+      case 'meteor': this.noise(t, 0.7, 0.12, 'lowpass', 900, .5); this.tone(t, 220, 0.6, 0.06, 'sine', 70); break;
+      case 'windHit': this.noise(t, 0.22, 0.09, 'bandpass', 1500, .6); break;
       case 'explosion':
         this.noise(t, 0.65, 0.3, 'lowpass', 700, 0.8);
         this.tone(t, 90, 0.5, 0.24, 'sine', 32);
         this.noise(t + 0.02, 0.3, 0.15, 'highpass', 1800, 0.5);
         break;
       case 'bolt':
-        this.noise(t, 0.32, 0.32, 'highpass', 2600, 0.5);
-        this.tone(t, 1800, 0.22, 0.13, 'square', 80);
-        this.tone(t + 0.03, 90, 0.4, 0.2, 'sine', 35);
+        this.noise(t, 0.32, 0.22, 'bandpass', 2400, 0.7);
+        this.tone(t, 1400, 0.22, 0.08, 'triangle', 90);
+        this.tone(t + 0.03, 90, 0.4, 0.18, 'sine', 35);
         break;
       case 'iceCast':
         this.tone(t, 1400, 0.3, 0.08, 'sine', 700);
@@ -346,12 +363,12 @@ export class AudioEngine {
         this.noise(t, 0.2, 0.07, 'highpass', 4200, 0.8);
         break;
       case 'freeze':
-        this.tone(t, 1900, 0.5, 0.07, 'sine', 520);
-        this.noise(t, 0.4, 0.09, 'highpass', 5200, 0.7);
+        this.tone(t, 1700, 0.5, 0.06, 'sine', 540);
+        this.noise(t, 0.4, 0.06, 'bandpass', 4200, 0.9);
         break;
       case 'shatter':
-        for (let i = 0; i < 5; i++) this.tone(t + i * 0.035, rand(1800, 3600), 0.22, 0.05, 'triangle', rand(600, 900));
-        this.noise(t, 0.3, 0.12, 'highpass', 3500, 0.6);
+        for (let i = 0; i < 3; i++) this.tone(t + i * 0.04, rand(1700, 2800), 0.2, 0.04, 'triangle', rand(700, 900));
+        this.noise(t, 0.28, 0.09, 'bandpass', 3000, 1.1);
         break;
       case 'heal':
         [523, 659, 784, 1046].forEach((f, i) => this.tone(t + i * 0.07, f, 0.4, 0.05, 'sine'));
@@ -371,38 +388,39 @@ export class AudioEngine {
         [392, 494, 587, 784, 988].forEach((f, i) => this.tone(t + i * 0.08, f, 0.7, 0.06, 'sine'));
         break;
       case 'ui': this.tone(t, 620, 0.06, 0.03, 'sine', 820); break;
-      case 'error': this.tone(t, 180, 0.14, 0.05, 'square', 120); break;
+      case 'error': this.tone(t, 210, 0.14, 0.035, 'triangle', 150); break;
       case 'arrow':
         this.noise(t, 0.2, 0.07, 'bandpass', 2200, 1.2);
         break;
       case 'goblin':
-        this.tone(t, rand(240, 320), 0.16, 0.08, 'sawtooth', rand(140, 200));
-        this.tone(t + 0.09, rand(180, 240), 0.18, 0.06, 'square', 120);
-        this.noise(t, 0.12, 0.05, 'bandpass', 900, 2);
+        this.tone(t, rand(240, 320), 0.16, 0.055, 'triangle', rand(140, 200));
+        this.tone(t + 0.09, rand(180, 240), 0.18, 0.04, 'sine', 120);
+        this.noise(t, 0.12, 0.04, 'bandpass', 900, 2);
         break;
-      case 'goblinDie': this.tone(t, rand(220, 280), 0.5, 0.09, 'sawtooth', 70); this.noise(t, 0.4, 0.08, 'lowpass', 700); break;
+      case 'goblinDie': this.tone(t, rand(220, 280), 0.5, 0.065, 'triangle', 70); this.noise(t, 0.4, 0.06, 'lowpass', 680); break;
       case 'roar':
-        this.tone(t, 110, 1.1, 0.16, 'sawtooth', 55);
-        this.tone(t + 0.04, 78, 1.0, 0.14, 'square', 42);
-        this.noise(t, 1.1, 0.12, 'lowpass', 380, 1.4);
+        this.tone(t, 120, 1.1, 0.11, 'triangle', 58);
+        this.tone(t + 0.04, 82, 1.0, 0.09, 'sine', 44);
+        this.noise(t, 1.1, 0.09, 'lowpass', 360, 1.2);
         break;
       case 'slam':
         this.tone(t, 70, 0.5, 0.26, 'sine', 30);
         this.noise(t, 0.45, 0.2, 'lowpass', 420);
         break;
       case 'bossDie':
-        this.noise(t, 1.6, 0.25, 'lowpass', 900);
-        this.tone(t, 90, 1.4, 0.2, 'sawtooth', 25);
-        [0, 0.22, 0.47, 0.8].forEach((d, i) => this.tone(t + d, 300 - i * 40, 0.5, 0.08, 'sawtooth', 60));
+        this.noise(t, 1.6, 0.2, 'lowpass', 820);
+        this.tone(t, 95, 1.4, 0.15, 'triangle', 28);
+        [0, 0.22, 0.47, 0.8].forEach((d, i) => this.tone(t + d, 300 - i * 40, 0.5, 0.06, 'triangle', 70));
         break;
-      case 'hurt': this.tone(t, 160, 0.2, 0.16, 'sawtooth', 80); this.noise(t, 0.12, 0.12, 'bandpass', 700, 1); break;
+      case 'hurt': this.tone(t, 170, 0.2, 0.12, 'triangle', 84); this.noise(t, 0.12, 0.09, 'bandpass', 700, 1); break;
       case 'door': this.noise(t, 0.5, 0.09, 'bandpass', 300, 2); break;
       case 'splash': this.noise(t, 0.35, 0.14, 'bandpass', 1300, .6); break;
       case 'victory':
         [523, 659, 784, 1046, 1318].forEach((f, i) => this.tone(t + i * 0.16, f, 1.4, 0.07, 'triangle'));
         break;
       case 'charge':
-        this.tone(t, 200, 0.5, 0.05, 'sawtooth', 700);
+        this.tone(t, 220, 0.5, 0.035, 'triangle', 640);
+        this.noise(t, 0.4, 0.03, 'bandpass', 1200, 1.2);
         break;
     }
   }

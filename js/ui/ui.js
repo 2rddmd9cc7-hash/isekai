@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { G, isTouch } from '../core/state.js';
 import { makePortrait, projectToScreen, clamp } from '../core/utils.js';
 import { ROADS, riverX, heightAt } from '../world/terrain.js';
+import { ELEMENTS, ELEMENT_ORDER, SPELLS, spellOf } from '../combat/spells.js';
 
 const $ = id => document.getElementById(id);
 
@@ -27,6 +28,7 @@ export class UI {
       'compassBar', 'zoneTitle', 'minimap', 'goldText', 'potionText', 'questTitle',
       'questObjectives', 'bossBar', 'bossName', 'bossPhase', 'bossFill', 'bossGhost',
       'enemyBars', 'skillbar', 'interactPrompt', 'interactText', 'lockHint', 'toast',
+      'spellBar', 'spellElement', 'spellName', 'spellCost', 'spellCast', 'spellPips',
       'subtitle', 'crosshair', 'damageLayer', 'dialogue', 'dlgPortrait', 'dlgName',
       'dlgText', 'dlgChoices', 'dlgNext', 'shopPanel', 'shopTitle', 'shopGold',
       'shopItems', 'shopFoot', 'mapPanel', 'bigmap', 'pausePanel', 'helpText',
@@ -51,6 +53,7 @@ export class UI {
     this.lastLevel = -1;
     this.chargeHideT = 0;
     this.callbacks = {};
+    this._spellSig = '';
 
     this.drawPlayerPortrait();
     this.buildChargeRing();
@@ -119,6 +122,21 @@ export class UI {
       if (name === 'sword') G.player.releaseAttack();
       else if (name !== 'dodge' && name !== 'heal') G.player.magicUp(name);
     });
+
+    if (this.el.spellPips) {
+      this.el.spellPips.addEventListener('pointerdown', e => {
+        const pip = e.target.closest('[data-spell]');
+        if (!pip || !G.player) return;
+        e.preventDefault();
+        const idx = Number(pip.dataset.spell);
+        G.player.spellChoice[G.player.element] = idx;
+        G.player.spellIndex = idx;
+        const sp = G.player.currentSpell();
+        if (G.audio) G.audio.sfx('ui');
+        this.setSpell(G.player.element, idx);
+        this.toast(`${ELEMENTS[G.player.element].icon} ${sp.name} · ${sp.cost} mana`, 'good');
+      });
+    }
   }
 
   bind(cbs) { Object.assign(this.callbacks, cbs); }
@@ -431,6 +449,27 @@ export class UI {
     this.flashTimer = setTimeout(() => { this.el.flash.style.opacity = '0'; }, 70);
   }
 
+  setSpell(element, index = 0) {
+    if (!this.el.spellPips) return;
+    const info = ELEMENTS[element] || ELEMENTS.fire;
+    const list = SPELLS[element] || SPELLS.fire;
+    const idx = Math.max(0, Math.min(list.length - 1, index | 0));
+    const sig = `${element}:${idx}:${list.length}`;
+    if (sig === this._spellSig) return;
+    this._spellSig = sig;
+    const sp = list[idx];
+    if (this.el.spellElement) {
+      this.el.spellElement.textContent = `${info.icon} ${info.name}`;
+      this.el.spellElement.style.color = info.accent;
+    }
+    if (this.el.spellName) this.el.spellName.textContent = sp.name;
+    if (this.el.spellCost) this.el.spellCost.textContent = `${sp.cost} mana`;
+    if (this.el.spellCast) this.el.spellCast.textContent = sp.cast > .05 ? `${sp.cast.toFixed(2)}s` : 'instantâneo';
+    this.el.spellPips.innerHTML = list.map((s, i) =>
+      `<span class="spell-pip${i === idx ? ' active' : ''}" data-spell="${i}" title="${s.name} · ${s.cost} mana">${s.icon}</span>`
+    ).join('');
+  }
+
   flashSkill(name) {
     const el = this.el.skillbar.querySelector(`[data-skill="${name}"]`);
     if (!el) return;
@@ -506,16 +545,19 @@ export class UI {
     this.el.lockHint.classList.toggle('hidden', !p.lockedTarget);
     if (p.lockedTarget && p.lockedTarget.dead) { p.lockedTarget = null; G.target = null; }
 
-    // cooldown overlays
-    for (const k of ['fire', 'bolt', 'ice']) {
+    // cooldown overlays — each element shows the cooldown of its selected spell
+    for (const k of ELEMENT_ORDER) {
       const el = this.el.skillbar.querySelector(`[data-skill="${k}"]`);
       if (!el) continue;
+      const spell = spellOf(k, p.spellChoice?.[k] || 0);
       const cd = p.cooldowns[k] || 0;
-      const ratio = clamp(cd / COOLDOWN_MAX[k], 0, 1);
+      const ratio = clamp(cd / Math.max(.4, spell.cd || 1), 0, 1);
       const fill = el.querySelector('.sk-cd');
       if (fill) fill.style.transform = `scaleY(${ratio})`;
       el.classList.toggle('cooling', ratio > .02);
+      el.classList.toggle('active', p.element === k);
     }
+    this.setSpell(p.element, p.spellChoice?.[p.element] || 0);
     const dodgeEl = this.el.skillbar.querySelector('[data-skill="dodge"]');
     if (dodgeEl) {
       const r = clamp((p.dodgeCd || 0) / COOLDOWN_MAX.dodge, 0, 1);

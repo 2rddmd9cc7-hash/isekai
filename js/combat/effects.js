@@ -6,8 +6,10 @@ const GLOW = makeGlowTexture('#ffffff');
 const SOFT = makeSoftTexture();
 
 function disposeMesh(obj) {
+  if (!obj || obj.userData?.disposed) return;
+  if (obj.userData) obj.userData.disposed = true;
   obj.traverse(o => {
-    if (o.geometry) o.geometry.dispose();
+    if (o.geometry && !o.geometry.userData?.shared) o.geometry.dispose();
     if (o.material) {
       if (Array.isArray(o.material)) o.material.forEach(m => { if (m.map && !m.map.userData?.shared) m.map.dispose(); m.dispose(); });
       else { if (o.material.map && !o.material.map.userData?.shared) o.material.map.dispose(); o.material.dispose(); }
@@ -24,11 +26,60 @@ export class Effects {
       fire: makeRuneTexture('#ffb05c', '#ffe6a0'),
       bolt: makeRuneTexture('#ffe98e', '#fff6d0'),
       ice: makeRuneTexture('#8fe9ff', '#dffcff'),
+      wind: makeRuneTexture('#9df0c0', '#e0fff0'),
       dark: makeRuneTexture('#b47cff', '#e6d0ff'),
       holy: makeRuneTexture('#ffd77a', '#fff2c8'),
     };
     this.sharedGlow = GLOW;
     this.sharedSoft = SOFT;
+    // ---- particle system pool: reuses geometry/material/Points objects.
+    // Combat used to build thousands of short-lived objects per fight.
+    this.particlePool = [];
+    this.maxParticleSystems = 34;
+    this.activeParticles = [];
+    this.sharedMaps = new Set([GLOW, SOFT, ...Object.values(this.runeTex)]);
+    this.stats = { particles: 0, pooled: 0 };
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  pooled particle bursts                                            */
+  /* ------------------------------------------------------------------ */
+  acquireParticles(count) {
+    const cap = Math.max(24, Math.min(120, count));
+    let slot = this.particlePool.find(p => !p.active && p.capacity >= cap);
+    if (!slot && this.particlePool.length < this.maxParticleSystems) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(cap * 3), 3));
+      geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(cap * 3), 3));
+      const mat = new THREE.PointsMaterial({
+        size: .13, vertexColors: true, transparent: true, opacity: 1, depthWrite: false,
+        blending: THREE.AdditiveBlending, map: SOFT, sizeAttenuation: true,
+      });
+      const pts = new THREE.Points(geo, mat);
+      pts.frustumCulled = false;
+      pts.renderOrder = 5;
+      pts.visible = false;
+      this.scene.add(pts);
+      slot = {
+        points: pts, geo, mat, capacity: cap, count: 0, active: false,
+        vel: new Float32Array(cap * 3), age: 0, life: 1, gravity: 0, drag: .5,
+      };
+      this.particlePool.push(slot);
+    }
+    if (!slot) {
+      // pool exhausted: steal the oldest active slot instead of allocating
+      slot = this.activeParticles[0] || this.particlePool[0];
+      if (!slot) return null;
+      slot.active = false;
+    }
+    return slot;
+  }
+
+  releaseParticles(slot) {
+    slot.active = false;
+    slot.points.visible = false;
+    const i = this.activeParticles.indexOf(slot);
+    if (i >= 0) this.activeParticles.splice(i, 1);
   }
 
   add(obj, life, update) {
@@ -36,18 +87,22 @@ export class Effects {
     return obj;
   }
 
-  /* ---------------- particles ---------------- */
+  /* ---------------- particles (pooled) ---------------- */
   particles(position, color, opts = {}) {
-    const count = opts.count ?? 18;
+    const reqCount = opts.count ?? 18;
+    if (reqCount <= 0) return null;
+    const slot = this.acquireParticles(reqCount);
+    if (!slot) return null;
+    const count = Math.min(reqCount, slot.capacity);
     const speed = opts.speed ?? 3;
     const size = opts.size ?? 0.13;
     const gravity = opts.gravity ?? 4;
-    const life = opts.life ?? .8;
+    const life = Math.max(.05, opts.life ?? .8);
     const spread = opts.spread ?? 1;
     const up = opts.up ?? 1;
-    const posArr = new Float32Array(count * 3);
-    const vel = [];
-    const colors = new Float32Array(count * 3);
+    const posArr = slot.geo.attributes.position.array;
+    const colorArr = slot.geo.attributes.color.array;
+    const vel = slot.vel;
     const c = new THREE.Color(color);
     const c2 = new THREE.Color(opts.color2 ?? color);
     for (let i = 0; i < count; i++) {
@@ -55,35 +110,50 @@ export class Effects {
       posArr[i * 3 + 1] = position.y + rand(-.1, .2) * spread;
       posArr[i * 3 + 2] = position.z + rand(-.15, .15) * spread;
       const a = rand(0, TAU), r = rand(.2, 1) * speed;
-      vel.push(new THREE.Vector3(Math.cos(a) * r, rand(.2, 1) * speed * up, Math.sin(a) * r));
+      vel[i * 3] = Math.cos(a) * r;
+      vel[i * 3 + 1] = rand(.2, 1) * speed * up;
+      vel[i * 3 + 2] = Math.sin(a) * r;
       const cc = c.clone().lerp(c2, Math.random());
-      colors[i * 3] = cc.r; colors[i * 3 + 1] = cc.g; colors[i * 3 + 2] = cc.b;
+      colorArr[i * 3] = cc.r; colorArr[i * 3 + 1] = cc.g; colorArr[i * 3 + 2] = cc.b;
     }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-    const mat = new THREE.PointsMaterial({
-      size, vertexColors: true, transparent: true, opacity: 1, depthWrite: false,
-      blending: opts.additive === false ? THREE.NormalBlending : THREE.AdditiveBlending,
-      map: SOFT, sizeAttenuation: true,
-    });
-    const pts = new THREE.Points(geo, mat);
-    pts.renderOrder = 5;
-    this.scene.add(pts);
-    const drag = opts.drag ?? .5;
-    this.add(pts, life, (age, dt) => {
-      const arr = geo.attributes.position.array;
-      for (let i = 0; i < count; i++) {
-        vel[i].y -= gravity * dt;
-        vel[i].multiplyScalar(1 - drag * dt);
-        arr[i * 3] += vel[i].x * dt;
-        arr[i * 3 + 1] += vel[i].y * dt;
-        arr[i * 3 + 2] += vel[i].z * dt;
+    slot.geo.setDrawRange(0, count);
+    slot.geo.attributes.position.needsUpdate = true;
+    slot.geo.attributes.color.needsUpdate = true;
+    slot.mat.size = size;
+    slot.mat.opacity = 1;
+    slot.mat.blending = opts.additive === false ? THREE.NormalBlending : THREE.AdditiveBlending;
+    slot.mat.needsUpdate = true;
+    slot.points.visible = true;
+    slot.count = count;
+    slot.age = 0;
+    slot.life = life;
+    slot.gravity = gravity;
+    slot.drag = opts.drag ?? .5;
+    slot.active = true;
+    if (this.activeParticles.indexOf(slot) < 0) this.activeParticles.push(slot);
+    this.stats.particles++;
+    return slot.points;
+  }
+
+  updateParticles(dt) {
+    for (let s = this.activeParticles.length - 1; s >= 0; s--) {
+      const slot = this.activeParticles[s];
+      if (!slot || !slot.active) { this.activeParticles.splice(s, 1); continue; }
+      slot.age += dt;
+      if (slot.age >= slot.life) { this.releaseParticles(slot); continue; }
+      const arr = slot.geo.attributes.position.array;
+      const vel = slot.vel;
+      const drag = 1 - slot.drag * dt;
+      for (let i = 0, n = slot.count * 3; i < n; i += 3) {
+        vel[i + 1] -= slot.gravity * dt;
+        vel[i] *= drag; vel[i + 1] *= drag; vel[i + 2] *= drag;
+        arr[i] += vel[i] * dt;
+        arr[i + 1] += vel[i + 1] * dt;
+        arr[i + 2] += vel[i + 2] * dt;
       }
-      geo.attributes.position.needsUpdate = true;
-      mat.opacity = Math.pow(1 - age / life, 1.4);
-    });
-    return pts;
+      slot.geo.attributes.position.needsUpdate = true;
+      slot.mat.opacity = Math.pow(1 - slot.age / slot.life, 1.4);
+    }
   }
 
   dust(position, color = 0xd8c49a, count = 10) {
@@ -468,21 +538,248 @@ export class Effects {
     if (G.player) G.player.shake(.5, 8);
   }
 
+  releaseObject(obj) {
+    if (!obj) return;
+    if (obj.userData && obj.userData.disposed) return;
+    if (obj.userData) obj.userData.disposed = true;
+    if (obj.parent) obj.parent.remove(obj);
+    obj.traverse(o => {
+      if (o.geometry && !o.geometry.userData?.shared) o.geometry.dispose();
+      if (!o.material) return;
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of mats) {
+        if (!m || m.userData?.shared) continue;
+        // never dispose the shared glow/soft/rune atlas textures
+        if (m.map && !this.sharedMaps.has(m.map)) m.map.dispose();
+        m.dispose();
+      }
+    });
+  }
+
   update(dt) {
+    this.updateParticles(dt);
     for (let i = this.effects.length - 1; i >= 0; i--) {
       const e = this.effects[i];
       e.age += dt;
-      if (e.update) e.update(e.age, dt);
+      try { if (e.update) e.update(e.age, dt); } catch (err) { console.warn('[Effects] update failed', err); e.age = e.life; }
       if (e.age >= e.life) {
-        if (e.obj.parent) e.obj.parent.remove(e.obj);
-        if (e.obj.geometry) e.obj.geometry.dispose();
-        // materials disposed lazily for shared textures
+        if (!e.obj.userData?.keep) this.releaseObject(e.obj);
+        else if (e.obj.parent) e.obj.parent.remove(e.obj);
         this.effects.splice(i, 1);
       }
     }
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
       const p = this.projectiles[i];
-      p.update(dt);
+      try { p.update(dt); } catch (err) { console.warn('[Effects] projectile failed', err); if (p.cleanup) p.cleanup(false); }
     }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  New elemental language                                            */
+  /* ------------------------------------------------------------------ */
+  boltOrb(from, target, opts = {}) {
+    const group = new THREE.Group();
+    const core = new THREE.Mesh(new THREE.SphereGeometry(.2, 10, 8), new THREE.MeshBasicMaterial({ color: 0xfff8d0 }));
+    const shell = new THREE.Mesh(new THREE.IcosahedronGeometry(.34, 0), new THREE.MeshBasicMaterial({ color: 0xffe86a, transparent: true, opacity: .55, blending: THREE.AdditiveBlending, depthWrite: false }));
+    const glow = glowSprite(0xffe86a, 1.7, GLOW);
+    group.add(core, shell, glow);
+    group.position.copy(from);
+    this.scene.add(group);
+    const speed = opts.speed ?? 30;
+    const life = opts.life ?? 1.4;
+    let age = 0;
+    const proj = {
+      mesh: group,
+      update: (dt) => {
+        age += dt;
+        const tp = typeof target === 'function' ? target() : target;
+        if (!tp) { cleanup(false); return; }
+        const d = new THREE.Vector3(tp.x, (tp.y ?? from.y) + .9, tp.z).sub(group.position);
+        const dist = d.length();
+        group.position.addScaledVector(d.normalize(), speed * dt);
+        shell.rotation.x += dt * 14; shell.rotation.y += dt * 9;
+        if (Math.random() < dt * 40) this.particles(group.position, 0xffe86a, { count: 2, speed: .8, size: .12, life: .25, gravity: 0, up: .3, spread: .25 });
+        if (dist < .8 || age > life) cleanup(true);
+      },
+      cleanup: (hit) => { /* replaced below */ },
+    };
+    const cleanup = (hit) => {
+      if (proj.done) return; proj.done = true;
+      const p = group.position.clone();
+      this.releaseObject(group);
+      if (hit) {
+        this.particles(p, 0xfff0a0, { count: 26, speed: 5, size: .14, life: .5, gravity: 3, up: .7 });
+        this.ring(p, 0xffe86a, .2, 2.2, .3, true);
+        opts.onHit && opts.onHit(p);
+      }
+      const idx = this.projectiles.indexOf(proj); if (idx >= 0) this.projectiles.splice(idx, 1);
+    };
+    proj.cleanup = cleanup;
+    this.projectiles.push(proj);
+    return proj;
+  }
+
+  windBlade(from, target, opts = {}) {
+    const group = new THREE.Group();
+    const geo = new THREE.RingGeometry(.42, .72, 22, 1, -.9, 1.8);
+    const mat = new THREE.MeshBasicMaterial({ color: opts.color ?? 0xb8ffe0, transparent: true, opacity: .9, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false });
+    const blade = new THREE.Mesh(geo, mat);
+    blade.rotation.x = -Math.PI / 2;
+    group.add(blade);
+    group.position.copy(from);
+    this.scene.add(group);
+    const speed = opts.speed ?? 26;
+    let age = 0;
+    const proj = {
+      mesh: group,
+      update: (dt) => {
+        age += dt;
+        const tp = typeof target === 'function' ? target() : target;
+        if (!tp) { cleanup(false); return; }
+        const d = new THREE.Vector3(tp.x, (tp.y ?? from.y) + .9, tp.z).sub(group.position);
+        const dist = d.length();
+        group.position.addScaledVector(d.normalize(), speed * dt);
+        blade.rotation.z += dt * 9;
+        group.rotation.y += dt * 4;
+        if (Math.random() < dt * 30) this.particles(group.position, 0xc8ffe0, { count: 1, speed: 1.2, size: .1, life: .3, gravity: 0, up: .4, spread: .3 });
+        if (dist < .8 || age > 1.4) cleanup(true);
+      },
+      cleanup: null,
+    };
+    const cleanup = (hit) => {
+      if (proj.done) return; proj.done = true;
+      const p = group.position.clone();
+      this.releaseObject(group);
+      if (hit) {
+        this.particles(p, 0xd8ffe8, { count: 20, speed: 4, size: .13, life: .5, gravity: 2, up: .7 });
+        this.ring(p, 0xb8ffe0, .3, 2.4, .3, true);
+        opts.onHit && opts.onHit(p);
+      }
+      const idx = this.projectiles.indexOf(proj); if (idx >= 0) this.projectiles.splice(idx, 1);
+    };
+    proj.cleanup = cleanup;
+    this.projectiles.push(proj);
+    return proj;
+  }
+
+  frostNova(pos, radius = 4.8, color = 0xbfefff) {
+    this.ring(pos, color, .3, radius, .6, true);
+    this.ring(pos, 0xffffff, .2, radius * .7, .42, true);
+    this.particles(pos, color, { count: 34, speed: radius * 1.1, size: .18, life: .8, gravity: 2.4, up: .8, spread: 1.2, color2: 0xffffff });
+    for (let i = 0; i < 6; i++) {
+      const shard = new THREE.Mesh(new THREE.ConeGeometry(rand(.08, .2), rand(.5, 1.2), 4), new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: .75, depthWrite: false }));
+      const a = i / 6 * TAU;
+      shard.position.copy(pos).add(new THREE.Vector3(Math.cos(a) * 1.1, .4, Math.sin(a) * 1.1));
+      shard.rotation.set(rand(-.3, .3), a, rand(-.3, .3));
+      this.scene.add(shard);
+      this.add(shard, .55, (age) => {
+        shard.position.y += .012;
+        shard.material.opacity = .75 * (1 - age / .55);
+        shard.rotation.y += .02;
+      });
+    }
+  }
+
+  meteorStrike(pos, radius = 3.8, color = 0xff7a2a, onHit = null) {
+    const target = pos.clone();
+    const marker = this.telegraph(target, radius, .55, 0xff8a4a);
+    const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(.65, 0), new THREE.MeshLambertMaterial({ color: 0x5a3a2a, emissive: 0x7a2200, emissiveIntensity: .7 }));
+    const glow = glowSprite(color, 3.4, GLOW); glow.material.opacity = .7;
+    const g = new THREE.Group(); g.add(rock, glow);
+    g.position.copy(target).add(new THREE.Vector3(rand(-2, 2), 26, rand(-2, 2)));
+    this.scene.add(g);
+    let t = 0;
+    const dur = .55;
+    this.add(g, dur + .1, (age, dt) => {
+      t += dt;
+      const k = Math.min(1, t / dur);
+      g.position.x += (target.x - g.position.x) * k * dt * 8;
+      g.position.z += (target.z - g.position.z) * k * dt * 8;
+      g.position.y = target.y + 26 * (1 - k);
+      rock.rotation.x += dt * 7; rock.rotation.z += dt * 4;
+      if (Math.random() < dt * 40) this.particles(g.position, color, { count: 2, speed: 1, size: .22, life: .35, gravity: -1, up: .2, spread: .5 });
+      if (k >= 1 && !g.userData.hit) {
+        g.userData.hit = true;
+        this.releaseObject(g);
+        this.explosion(target, color, 1.35);
+        onHit && onHit(target);
+      }
+    });
+    return marker;
+  }
+
+  chainLightning(points, color = 0xffe86a) {
+    if (!points || points.length < 2) return;
+    for (let i = 0; i < points.length - 1; i++) {
+      const a = points[i], b = points[i + 1];
+      const mid = a.clone().lerp(b, .5).add(new THREE.Vector3(rand(-1.2, 1.2), rand(.4, 1.4), rand(-1.2, 1.2)));
+      const geo = new THREE.BufferGeometry().setFromPoints([a, mid, b]);
+      const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: .95, blending: THREE.AdditiveBlending, depthWrite: false }));
+      line.renderOrder = 8;
+      this.scene.add(line);
+      this.add(line, .22, (age) => { line.material.opacity = .95 * (1 - age / .22); });
+      this.particles(mid, color, { count: 8, speed: 3, size: .12, life: .3, gravity: 2, up: .6, spread: .4 });
+    }
+    this.ring(points[points.length - 1].clone(), color, .2, 2.2, .3, true);
+  }
+
+  cyclone(pos, radius = 3.6, color = 0xa8f0d0, duration = 1.3) {
+    const group = new THREE.Group();
+    for (let i = 0; i < 3; i++) {
+      const torus = new THREE.Mesh(
+        new THREE.TorusGeometry(radius * (.45 + i * .18), .06, 5, 28),
+        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: .55 - i * .1, blending: THREE.AdditiveBlending, depthWrite: false })
+      );
+      torus.rotation.x = Math.PI / 2;
+      torus.position.y = .45 + i * .55;
+      group.add(torus);
+    }
+    group.position.copy(pos);
+    this.scene.add(group);
+    this.add(group, duration, (age, dt) => {
+      group.rotation.y += dt * 7;
+      group.children.forEach((c, i) => { c.rotation.z += dt * (2 + i); c.scale.setScalar(1 + Math.sin(age * 5 + i) * .05); });
+      if (Math.random() < dt * 26) this.particles(group.position.clone().add(new THREE.Vector3(rand(-2, 2), rand(.2, 2), rand(-2, 2))), color, { count: 1, speed: .5, size: .12, life: .4, gravity: 0, up: .3, spread: .3 });
+    });
+    this.ring(pos, color, .3, radius, .5, true);
+  }
+
+  gust(pos, yaw, range = 7, color = 0xb8ffe0) {
+    for (let i = 0; i < 4; i++) {
+      const geo = new THREE.RingGeometry(.7 + i * .35, 1.1 + i * .35, 22, 1, -1.1, 2.2);
+      const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: .45, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false });
+      const m = new THREE.Mesh(geo, mat);
+      m.rotation.x = -Math.PI / 2 + .12;
+      m.rotation.z = -yaw;
+      m.position.copy(pos); m.position.y += .3 + i * .06;
+      m.scale.setScalar(1 + i * .5);
+      this.scene.add(m);
+      this.add(m, .45 + i * .04, (age, dt) => {
+        const t = age / (.45 + i * .04);
+        m.scale.setScalar((1 + i * .5) * (1 + t * 1.4));
+        m.position.addScaledVector(new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw)), dt * range * .7);
+        mat.opacity = .45 * (1 - t);
+      });
+    }
+    this.particles(pos.clone().add(new THREE.Vector3(Math.sin(yaw) * 2, .6, Math.cos(yaw) * 2)), color, { count: 30, speed: 6, size: .14, life: .6, gravity: 0, up: .5, spread: 1.4, drag: 1.2 });
+  }
+
+  afterimage(pos, yaw, color = 0x9fe8ff) {
+    const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: .3, depthWrite: false, blending: THREE.AdditiveBlending });
+    mat.userData.shared = false;
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.CapsuleGeometry(.24, .86, 3, 7), mat);
+    body.position.y = .92;
+    const head = new THREE.Mesh(new THREE.SphereGeometry(.22, 8, 7), mat);
+    head.position.y = 1.62;
+    g.add(body, head);
+    g.position.copy(pos);
+    g.rotation.y = yaw;
+    this.scene.add(g);
+    this.add(g, .32, (age) => {
+      mat.opacity = .3 * (1 - age / .32);
+      g.scale.setScalar(1 - age / .32 * .15);
+    });
+    return g;
   }
 }

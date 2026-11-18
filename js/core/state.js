@@ -12,6 +12,9 @@ export const G = {
   zone: 'Vila de Brisa',
   flags: {},
   debug: false,
+  // stability telemetry: one bad spell or enemy must never stop the loop
+  errors: 0,
+  lastError: '',
 };
 export const isTouch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
 export function dist2d(a, b) { return Math.hypot(a.x - b.x, a.z - b.z); }

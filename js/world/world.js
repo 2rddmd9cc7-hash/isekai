@@ -361,6 +361,25 @@ export class World {
     this.addExclusion(0, -108, 30);
     this.addCollider(0, -98, 7.5);
     this.mapPOIs.push({ x: 0, z: -105, name: 'Castelo de Aetheria', icon: '♜', kind: 'castle', major: true });
+    // The gate seal reads the player's current attunement (see QuestSystem.inspectCastleSeal).
+    this.castleSeal = { x: 0, z: -90.5, radius: 4.6 };
+    const sealY = heightAt(0, -90.5);
+    const sealGroup = new THREE.Group();
+    sealGroup.position.set(0, sealY + .06, -90.5);
+    const sealRing = new THREE.Mesh(
+      new THREE.RingGeometry(.85, 1.18, 36),
+      new THREE.MeshBasicMaterial({ color: 0xffd479, transparent: true, opacity: .45, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false })
+    );
+    sealRing.rotation.x = -Math.PI / 2;
+    sealGroup.add(sealRing);
+    const sealGem = new THREE.Mesh(new THREE.OctahedronGeometry(.28, 0), new THREE.MeshBasicMaterial({ color: 0xffe7a0 }));
+    sealGem.position.y = 1.35; sealGem.scale.y = 1.7; sealGroup.add(sealGem);
+    const sealGlow = glowSprite(0xffd479, 2.4, GLOW);
+    sealGlow.position.y = 1.35; sealGlow.material.opacity = .3; sealGroup.add(sealGlow);
+    this.scene.add(sealGroup);
+    this.castleSealGroup = sealGroup;
+    this.castleSealGem = sealGem;
+    this.castleSealRing = sealRing;
 
     // ---- small roadside shrines ----
     for (const [x, z, r] of [[-29, 14, .2], [31, -34, -.3], [78, 18, .4]]) {
@@ -712,6 +731,15 @@ export class World {
       if (a.altar && a.altar.userData.crystal) a.altar.userData.crystal.rotation.y += dt * (a.active ? 1.7 : .45);
       if (a.altar && a.altar.userData.ring) a.altar.userData.ring.rotation.z += dt * .12;
       if (!a.active && a.marker.visible) a.marker.position.y = 3.3 + Math.sin(t * 2.2 + a.x) * .12;
+    }
+
+    // castle seal
+    if (this.castleSealGroup) {
+      if (this.castleSealGem) {
+        this.castleSealGem.rotation.y += dt * 1.15;
+        this.castleSealGem.position.y = 1.35 + Math.sin(t * 1.8) * .1;
+      }
+      if (this.castleSealRing) this.castleSealRing.rotation.z += dt * .22;
     }
 
     // npcs

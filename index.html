@@ -58,6 +58,15 @@
 
     <div id="enemyBars"></div>
 
+    <div id="spellBar">
+      <div class="spell-head">
+        <span id="spellElement">🔥 Fogo</span>
+        <span id="spellName">Faísca Ígnea</span>
+      </div>
+      <div id="spellPips"></div>
+      <div class="spell-meta"><span id="spellCost">8 mana</span><span id="spellCast">0.28s</span><span class="spell-key">R alterna</span></div>
+    </div>
+
     <div id="skillbar">
       <div class="skill" data-skill="sword" title="Espada — clique para atacar, segure para carregar">
         <div class="sk-icon">⚔</div><div class="sk-key">LMB</div><div class="sk-cd"></div>
@@ -70,6 +79,9 @@
       </div>
       <div class="skill" data-skill="ice" title="Gelo — 3">
         <div class="sk-icon ice">❄</div><div class="sk-key">3</div><div class="sk-cd"></div>
+      </div>
+      <div class="skill" data-skill="wind" title="Vento — 4">
+        <div class="sk-icon wind">🍃</div><div class="sk-key">4</div><div class="sk-cd"></div>
       </div>
       <div class="skill small" data-skill="dodge" title="Esquiva — Q">
         <div class="sk-icon">💨</div><div class="sk-key">Q</div><div class="sk-cd"></div>
@@ -85,7 +97,7 @@
     <div id="subtitle"></div>
     <div id="crosshair" class="hidden"><div class="ch-dot"></div><div class="ch-ring"></div></div>
     <div id="damageLayer"></div>
-    <div id="hintBar"><span><b>WASD</b> mover</span><span><b>Shift</b> correr</span><span><b>Espaço</b> saltar</span><span><b>Q</b> esquivar</span><span><b>E</b> interagir</span><span><b>V</b> 1ª pessoa</span><span><b>TAB</b> mirar</span><span><b>M</b> mapa</span></div>
+    <div id="hintBar"><span><b>WASD</b> mover</span><span><b>Shift</b> correr</span><span><b>Espaço</b> saltar</span><span><b>Q</b> esquivar</span><span><b>1-4</b> elementos</span><span><b>R</b> troca magia</span><span><b>E</b> interagir</span><span><b>V</b> 1ª pessoa</span><span><b>TAB</b> mirar</span><span><b>M</b> mapa</span></div>
   </div>
 
   <div id="dialogue" class="hidden">
@@ -127,7 +139,7 @@
       <div id="helpText" class="help-text hidden">
         <p><b>Explorar</b> — WASD, Shift para correr, Espaço para saltar, V alterna 1ª/3ª pessoa.</p>
         <p><b>Combate</b> — Clique esquerdo faz um combo de 3 golpes; segure para o Corte Carregado. Q esquiva (invencível por um instante). Tab trava no inimigo mais próximo.</p>
-        <p><b>Magia</b> — 1 Fogo (segure para carregar), 2 Raio (instantâneo em área), 3 Gelo (congela). Cada elemento tem um efeito próprio.</p>
+        <p><b>Magia</b> — 1 Fogo, 2 Raio, 3 Gelo, 4 Vento. Cada elemento tem 5 magias: <b>R</b> alterna a magia do elemento ativo e o grimório mostra custo e conjuração. O Selo do Castelo lê sua sintonia atual.</p>
         <p><b>Jornada</b> — E fala e interage. H usa poção. M abre o mapa. Complete as missões com Mira, Brann, Lys e Tuli.</p>
       </div>
     </div>
@@ -149,6 +161,7 @@
       <button class="mbtn" data-m="fire">🔥</button>
       <button class="mbtn" data-m="bolt">⚡</button>
       <button class="mbtn" data-m="ice">❄</button>
+      <button class="mbtn" data-m="wind">🍃</button>
       <button class="mbtn attack" data-m="attack">⚔</button>
       <button class="mbtn" data-m="dodge">💨</button>
       <button class="mbtn" data-m="interact">E</button>
@@ -174,7 +187,7 @@
     <p class="start-desc">O cristal que sustenta o reino está se apagando. Goblins descem das colinas e algo antigo desperta sob as ruínas. Pegue sua lâmina, desperte os elementos e atravesse as Terras de Brisa.</p>
     <button id="startBtn" class="start-btn">Iniciar Jornada</button>
     <div class="start-controls">
-      <span><b>WASD</b> mover</span><span><b>LMB</b> atacar</span><span><b>1 2 3</b> magias</span><span><b>Q</b> esquivar</span><span><b>E</b> interagir</span><span><b>V</b> 1ª pessoa</span>
+      <span><b>WASD</b> mover</span><span><b>LMB</b> atacar</span><span><b>1-4</b> elementos</span><span><b>R</b> magia</span><span><b>Q</b> esquivar</span><span><b>E</b> interagir</span><span><b>V</b> 1ª pessoa</span>
     </div>
     <div class="start-note">Better with sound · use fones para a experiência completa</div>
   </div>

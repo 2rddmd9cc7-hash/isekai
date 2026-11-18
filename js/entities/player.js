@@ -5,6 +5,7 @@ import {
   makePortrait, makeClothTexture, box, sphere, cyl, plane
 } from '../core/utils.js';
 import { heightAt, surfaceAt, WATER_LEVEL } from '../world/terrain.js';
+import { ELEMENTS, ELEMENT_ORDER, SPELLS, spellOf } from '../combat/spells.js';
 
 const GLOW = makeGlowTexture('#ffffff');
 const isWaterAt = (x, z) => heightAt(x, z) < WATER_LEVEL + .15;
@@ -117,9 +118,22 @@ export class Player {
     this.chargeT = 0;
     this.fireCharging = false;
     this.fireChargeT = 0;
-    this.cooldowns = { fire: 0, bolt: 0, ice: 0 };
+    // ---- elemental codex: 4 attunements x 5 distinct spells ----
+    this.element = 'fire';
+    this.spellIndex = 0;
+    this.spellChoice = { fire: 0, bolt: 0, ice: 0, wind: 0 };
+    this.unlocked = { fire: true, ice: true, bolt: true, wind: true };
+    this.spellCds = {};
+    this.castCounts = { fire: 0, bolt: 0, ice: 0, wind: 0 };
+    this.cooldowns = { fire: 0, bolt: 0, ice: 0, wind: 0 };
     this.castAnim = 0;
     this.castElement = null;
+    this.castSpell = null;
+    this.castTarget = null;
+    this.castAimPos = new THREE.Vector3();
+    this.castPower = 1;
+    this.pendingStrikes = [];
+    this.pendingVortex = null;
     this.hitStop = 0;
     this.lockedTarget = null;
     this.lastAttackPress = 0;
@@ -127,6 +141,7 @@ export class Player {
     this.attackHeldTime = 0;
     this.target = null;
     this.shakeT = 0; this.shakeAmp = 0;
+    this.guardBreak = 0;
 
     // ---- camera ----
     this.camAngle = 0;
@@ -469,7 +484,9 @@ export class Player {
     const s = glowSprite(0x7ff0ff, .13, GLOW); s.material.opacity = .26; gem.add(s);
   }
   addBookGlow(book) {
-    const s = glowSprite(0x7ff0ff, .5, GLOW); s.material.opacity = .35; s.position.y = .08; book.add(s);
+    // Small, warm-held glow instead of a detached floating orb.
+    const s = glowSprite(0x7ff0ff, .22, GLOW);
+    s.material.opacity = .16; s.position.set(0, .04, -.01); book.add(s);
     this.bookGlow = s;
   }
 
@@ -513,7 +530,7 @@ export class Player {
     const lFore = cyl(.03, .04, .32, 7, sleeve, 0, 0, -.16); lFore.rotation.x = Math.PI / 2; lArm.add(lFore);
     const lCuff = cyl(.042, .044, .05, 7, glove, 0, 0, -.29); lCuff.rotation.x = Math.PI / 2; lArm.add(lCuff);
     const lHand = sphere(.042, skin, 0, 0, -.33, 8); lArm.add(lHand);
-    const book = new THREE.Group(); book.position.set(-.015, .035, -.395); book.rotation.set(1.12, -.28, .12); lArm.add(book);
+    const book = new THREE.Group(); book.position.set(-.015, .045, -.355); book.rotation.set(1.12, -.28, .12); lArm.add(book);
     book.add(box(.115, .034, .145, toon(0x3c2718, { rim: .1, rimColor: 0xffc890 }), 0, 0, 0));
     book.add(box(.1, .028, .128, toon(0xefe3c6), 0, .018, 0));
     book.add(box(.012, .036, .145, gold, -.055, 0, 0));
@@ -521,7 +538,7 @@ export class Player {
     book.add(box(.09, .006, .006, toon(0xbfae8e), 0, .033, -.02));
     const bookRune = new THREE.Mesh(new THREE.CircleGeometry(.022, 12), new THREE.MeshBasicMaterial({ color: 0x8ff8ff, transparent: true, opacity: .95 }));
     bookRune.rotation.x = -Math.PI / 2; bookRune.position.set(.014, .034, 0); book.add(bookRune);
-    const glow = glowSprite(0x7ff0ff, .2, GLOW); glow.material.opacity = .3; glow.position.y = .06; book.add(glow);
+    const glow = glowSprite(0x7ff0ff, .11, GLOW); glow.material.opacity = .14; glow.position.set(0, .035, 0); book.add(glow);
     this.fpBookGlow = glow;
     this.fpLArm = lArm;
     const handGlow = glowSprite(0xffb066, .01, GLOW); handGlow.material.opacity = 0; handGlow.position.set(0, 0, -.4); lArm.add(handGlow);
@@ -570,6 +587,7 @@ export class Player {
 
   startAttack(index = null) {
     if (this.dead) return;
+    this.snapAimToCamera();
     if (!this.action) this.combo = index !== null ? index : (this.combo + 1) % 3;
     const names = ['attack1', 'attack2', 'attack3'];
     const durations = [.42, .52, .46];
@@ -583,57 +601,107 @@ export class Player {
 
   heavyAttack(power = 1) {
     if (this.dead) return;
+    this.snapAimToCamera();
     this.action = { name: 'heavy', t: 0, dur: .9, hitDone: false, power };
     this.combo = 0;
     if (G.ui) G.ui.setCharge(0, null);
     if (G.audio) G.audio.sfx('heavySwing');
   }
 
+  /* ---------------- elemental codex ---------------- */
+  currentSpellFor(element = this.element) {
+    const idx = this.spellChoice[element] ?? 0;
+    return spellOf(element, idx);
+  }
+
+  currentSpell() { return this.currentSpellFor(this.element); }
+
+  selectElement(element, silent = false) {
+    if (!this.unlocked[element] || !ELEMENTS[element]) {
+      if (!silent && G.ui) G.ui.toast('Elemento ainda não despertado', 'warn');
+      return false;
+    }
+    this.element = element;
+    this.spellIndex = this.spellChoice[element] || 0;
+    if (G.ui && G.ui.setSpell) G.ui.setSpell(this.element, this.spellIndex);
+    if (!silent) {
+      const sp = this.currentSpell();
+      if (G.ui) G.ui.toast(`${ELEMENTS[element].icon} ${ELEMENTS[element].name} · ${sp.name}`, 'good');
+      if (G.audio) G.audio.sfx('ui');
+    }
+    return true;
+  }
+
+  cycleSpell(delta = 1) {
+    const list = SPELLS[this.element];
+    if (!list) return;
+    const cur = this.spellChoice[this.element] || 0;
+    this.spellChoice[this.element] = (cur + delta + list.length) % list.length;
+    this.spellIndex = this.spellChoice[this.element];
+    const sp = this.currentSpell();
+    if (G.ui) {
+      G.ui.setSpell(this.element, this.spellIndex);
+      G.ui.flashSkill(this.element);
+      G.ui.toast(`${ELEMENTS[this.element].icon} ${sp.name} · ${sp.cost} mana`, 'good');
+    }
+    if (G.audio) G.audio.sfx('ui');
+  }
+
   magicDown(element) {
-    if (this.dead || this.action || this.dodgeTime > 0) return;
-    if (this.cooldowns[element] > 0) { if (G.audio) G.audio.sfx('error'); return; }
-    if (this.mp < (element === 'fire' ? 12 : element === 'bolt' ? 22 : 15)) {
-      if (G.ui) G.ui.toast('Mana insuficiente', 'warn');
-      if (G.audio) G.audio.sfx('error');
-      return;
-    }
-    if (element === 'fire') {
-      this.fireCharging = true; this.fireChargeT = 0;
-      this.effects.magicCircle(this.pos.clone().setY(this.groundYpos()), 'fire', 3.2, 2, this.pos);
-      if (G.audio) G.audio.sfx('fireCharge');
-      return;
-    }
-    this.cast(element, 1);
-  }
-
-  magicUp(element) {
-    if (element !== 'fire' || !this.fireCharging) return;
-    const power = clamp(1 + this.fireChargeT * .75, 1, 2);
-    this.fireCharging = false;
-    if (G.ui) G.ui.setCharge(0, null);
-    this.cast('fire', power);
-  }
-
-  cast(element, power = 1) {
     if (this.dead) return;
-    const cost = element === 'fire' ? 12 + Math.round(power * 6) : element === 'bolt' ? 22 : 15;
-    if (this.mp < cost) { if (G.audio) G.audio.sfx('error'); return; }
-    this.mp -= cost;
-    this.cooldowns[element] = element === 'bolt' ? 4.5 : element === 'fire' ? 2.7 : 3.4;
-    this.action = { name: 'cast', t: 0, dur: element === 'bolt' ? .62 : .55, hitDone: false, element };
-    this.castElement = element;
-    this.castPower = power;
-    this.castResolved = false;
-    if (G.audio) G.audio.sfx(element === 'bolt' ? 'charge' : element === 'ice' ? 'iceCast' : 'fireCast');
-    if (G.ui) G.ui.flashSkill(element);
-    // aim target
-    let target = this.pickTarget(26, 130 * Math.PI / 180);
-    if (target) this.faceToward(target.group.position, true);
-    const aimPos = target ? target.group.position.clone() : this.aimPoint(20);
+    // element keys always switch attunement, even mid-animation; the cast
+    // itself waits for a free moment instead of silently swallowing input.
+    if (element) this.selectElement(element, true);
+    if (this.action || this.dodgeTime > 0) return;
+    this.castCurrent();
+  }
+
+  magicUp() { /* casting resolves on press; retained for input compatibility */ }
+
+  castCurrent(element = this.element) {
+    if (this.dead || this.action || this.dodgeTime > 0) return false;
+    const spell = this.currentSpellFor(element);
+    if (!spell) return false;
+    const cd = this.spellCds[spell.id] || 0;
+    if (cd > 0) {
+      if (G.ui) G.ui.toast(`Recarregando ${spell.name} (${cd.toFixed(1)}s)`, 'warn');
+      if (G.audio) G.audio.sfx('error');
+      return false;
+    }
+    if (this.mp < spell.cost) {
+      if (G.ui) G.ui.toast(`Mana insuficiente · ${spell.name} custa ${spell.cost}`, 'warn');
+      if (G.audio) G.audio.sfx('error');
+      return false;
+    }
+    this.mp -= spell.cost;
+    this.spellCds[spell.id] = spell.cd;
+    this.cooldowns[element] = spell.cd;
+
+    // aim from the camera rather than the last movement direction
+    this.snapAimToCamera();
+
+    // target / aim point appropriate to each shape
+    const aimRange = spell.range || (spell.kind === 'projectile' ? 26 : spell.kind === 'nova' ? 4 : 18);
+    const cone = spell.kind === 'projectile' ? Math.PI * .7 : Math.PI * 2;
+    const target = this.pickTarget(aimRange, cone);
     this.castTarget = target;
-    this.castAimPos = aimPos;
-    this.effects.magicCircle(this.pos.clone().setY(this.groundYpos()), element, element === 'bolt' ? 2.6 : 3.4, .9, this.pos);
-    if (element === 'fire') G.audio && G.audio.sfx('fireCharge');
+    this.castElement = element;
+    this.castSpell = spell;
+    this.castPower = 1;
+    this.castAimPos.copy(target ? target.group.position : this.aimPoint(aimRange));
+    this.castAimPos.y = this.groundYpos() + .1;
+
+    this.action = {
+      name: 'cast', t: 0, dur: Math.max(.34, (spell.cast || .3) + .18),
+      element, spell, resolveAt: Math.max(.16, spell.cast || .3), resolved: false,
+    };
+    if (target) this.faceToward(target.group.position, true);
+    else this.faceToward(this.castAimPos, true);
+
+    this.effects.magicCircle(this.pos.clone().setY(this.groundYpos()), element, spell.kind === 'nova' ? 4.4 : 3.1, .8, this.pos);
+    const sfx = element === 'bolt' ? 'castBolt' : element === 'ice' ? 'castIce' : element === 'wind' ? 'castWind' : 'castFire';
+    if (G.audio) G.audio.sfx(sfx);
+    return true;
   }
 
   aimPoint(dist = 18) {
@@ -695,23 +763,8 @@ export class Player {
   }
 
   spawnAfterimage() {
-    const ghostMat = new THREE.MeshBasicMaterial({ color: 0x8fe8ff, transparent: true, opacity: .28, depthWrite: false, blending: THREE.AdditiveBlending });
-    const ghost = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.CapsuleGeometry(.26, .9, 4, 8), ghostMat);
-    body.position.y = .95;
-    const head = new THREE.Mesh(new THREE.SphereGeometry(.23, 8, 8), ghostMat);
-    head.position.y = 1.66;
-    ghost.add(body, head);
-    ghost.position.copy(this.pos);
-    ghost.rotation.y = this.group.rotation.y;
-    this.scene.add(ghost);
-    let age = 0;
-    const tick = () => {
-      age += .016;
-      ghostMat.opacity = .28 * (1 - age / .35);
-      if (age < .35) requestAnimationFrame(tick); else this.scene.remove(ghost);
-    };
-    tick();
+    // Effects owns the mesh lifetime, so dodge no longer leaks geometry/materials.
+    this.effects.afterimage(this.pos.clone().setY(this.groundYpos() + .02), this.group.rotation.y, 0x8fe8ff);
   }
 
   usePotion() {
@@ -834,6 +887,18 @@ export class Player {
     return new THREE.Vector3(Math.sin(this.group.rotation.y), 0, Math.cos(this.group.rotation.y));
   }
 
+  /** Direction the camera is looking (third-person uses the camera orbit, first-person the view yaw). */
+  aimYaw() {
+    return this.firstPerson ? this.viewYaw : this.camAngle + Math.PI;
+  }
+
+  /** Snap melee/magic aim to the camera unless a target is locked. */
+  snapAimToCamera() {
+    if (this.lockedTarget && !this.lockedTarget.dead) return;
+    this.facing = this.aimYaw();
+    this.group.rotation.y = this.facing;
+  }
+
   faceToward(pos, instant = false) {
     const yaw = Math.atan2(pos.x - this.pos.x, pos.z - this.pos.z);
     if (instant) this.group.rotation.y = yaw;
@@ -881,6 +946,7 @@ export class Player {
     this.dodgeCd = Math.max(0, this.dodgeCd - dt);
     this.comboWindow = Math.max(0, this.comboWindow - dt);
     for (const k in this.cooldowns) this.cooldowns[k] = Math.max(0, this.cooldowns[k] - dt);
+    for (const k in this.spellCds) this.spellCds[k] = Math.max(0, this.spellCds[k] - dt);
     if (this.comboWindow <= 0 && !this.action) this.combo = 0;
     if (this.shakeT > 0) this.shakeT -= dt;
     // held attack -> charge
@@ -913,7 +979,9 @@ export class Player {
       if (this.firstPerson) baseSpeed *= .96;
       const forwardYaw = this.firstPerson ? this.viewYaw : this.camAngle + Math.PI;
       const camForward = new THREE.Vector3(Math.sin(forwardYaw), 0, Math.cos(forwardYaw));
-      const camRight = new THREE.Vector3(camForward.z, 0, -camForward.x);
+      // Screen-right for a camera looking along camForward is (-forward.z, 0, forward.x).
+      // The old +forward.z form mirrored A/D and was the "inverted controls" report.
+      const camRight = new THREE.Vector3(-camForward.z, 0, camForward.x);
       const world = new THREE.Vector3();
       world.addScaledVector(camForward, input.z);
       world.addScaledVector(camRight, input.x);
@@ -926,7 +994,7 @@ export class Player {
         this.facing = yaw;
       }
       if (!this.firstPerson) {
-        if (this.action && this.action.name.startsWith('attack')) { /* keep facing */ }
+        if (this.action && (this.action.name.startsWith('attack') || this.action.name === 'cast')) { /* keep facing the committed target */ }
         else {
           let diff = angleDiff(this.facing, this.group.rotation.y);
           this.group.rotation.y += diff * (1 - Math.exp(-dt * (this.dodgeTime > 0 ? 18 : 12)));
@@ -1032,14 +1100,15 @@ export class Player {
       }
     }
     if (a.name === 'cast') {
-      if (!this.castResolved && t > (a.element === 'bolt' ? .55 : .5)) {
-        this.castResolved = true;
-        this.resolveCast(this.castElement, this.castPower);
+      if (!a.resolved && a.t >= (a.resolveAt || .4)) {
+        a.resolved = true;
+        this.resolveCast(a.element, a.spell);
       }
     }
     if (a.t >= a.dur) {
       this.action = null;
       this.castElement = null;
+      this.castSpell = null;
     }
   }
 
@@ -1110,73 +1179,256 @@ export class Player {
     if (G.ui) G.ui.flashSkill('sword');
   }
 
-  resolveCast(element, power) {
-    const target = this.castTarget && !this.castTarget.dead ? this.castTarget : null;
-    const targetPosFn = () => target ? target.group.position.clone() : this.castAimPos.clone();
-    const from = this.handWorldPos();
-    if (element === 'fire') {
-      this.effects.fireball(from, targetPosFn, {
-        color: 0xff8a3a, scale: .9 + power * .5, speed: 20,
-        onHit: (p) => {
-          const radius = 2.6 + power * .5;
-          if (G.audio) G.audio.sfx('explosion');
-          if (G.player) G.player.shake(.3, 4);
-          for (const e of G.enemies) {
-            if (e.dead) continue;
-            const d = e.group.position.distanceTo(p);
-            if (d < radius + (e.radius || 0)) {
-              const crit = this.rollCrit();
-              const falloff = 1 - clamp(d / (radius + 1.5), 0, .55);
-              const dmg = Math.round(this.magicBase() * 1.35 * power * falloff * (crit ? 1.7 : 1));
-              e.takeDamage(dmg, { type: 'fire', crit, from: this.pos, knockback: 2.5, burn: 2, effect: (ep) => this.effects.hitSpark(ep, 0xffa04a, crit) });
-            }
-          }
-        },
+  /* ---------------- spell resolution ---------------- */
+  groundYposAt(x, z) {
+    return (G.groundAt ? G.groundAt(x, z) : heightAt(x, z));
+  }
+
+  spellStatus(spell) {
+    return {
+      freeze: spell.freeze,
+      burn: spell.burn,
+      knockback: spell.knockback || 0,
+      slow: spell.slow,
+      stun: spell.stun,
+      color: spell.color || 0xfff0c0,
+    };
+  }
+
+  areaDamage(center, radius, mult, element, extra = {}) {
+    let hits = 0;
+    for (const e of G.enemies) {
+      if (e.dead) continue;
+      const d = e.group.position.distanceTo(center);
+      if (d > radius + (e.radius || 0)) continue;
+      const crit = this.rollCrit();
+      const falloff = 1 - clamp(d / (radius + 2.2), 0, .4);
+      const dmg = Math.round(this.magicBase() * mult * falloff * (crit ? 1.7 : 1) * rand(.94, 1.06));
+      e.takeDamage(dmg, {
+        type: element, crit, from: this.pos,
+        ...extra,
+        effect: (ep) => this.effects.hitSpark(ep, extra.color || 0xfff0c0, crit),
       });
-      this.effects.fireCharge(from, .25);
-    } else if (element === 'bolt') {
-      const p = targetPosFn();
-      p.y = (G.groundAt ? G.groundAt(p.x, p.z) : heightAt(p.x, p.z));
-      // delayed strike
-      this.pendingBolt = { t: .22, pos: p, power };
-      this.effects.magicCircle(p.clone().setY(p.y + .06), 'bolt', 4, .5);
-    } else if (element === 'ice') {
-      this.effects.iceShard(from, targetPosFn, {
-        onHit: (p) => {
-          for (const e of G.enemies) {
-            if (e.dead) continue;
-            const d = e.group.position.distanceTo(p);
-            if (d < 2.4 + (e.radius || 0)) {
-              const crit = this.rollCrit();
-              const dmg = Math.round(this.magicBase() * 1.05 * (crit ? 1.7 : 1));
-              e.takeDamage(dmg, { type: 'ice', crit, from: this.pos, knockback: 1, freeze: 3, effect: (ep) => this.effects.hitSpark(ep, 0x9ff0ff, crit) });
-              if (G.audio) G.audio.sfx('freeze');
-            }
-          }
-        },
-      });
+      hits++;
     }
+    if (hits) {
+      G.hitStop = Math.max(G.hitStop || 0, .035);
+      this.shake(.16, 3);
+    }
+    return hits;
+  }
+
+  coneDamage(origin, yaw, range, arc, mult, element, extra = {}) {
+    const fwd = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+    let hits = 0;
+    for (const e of G.enemies) {
+      if (e.dead) continue;
+      const to = new THREE.Vector3().subVectors(e.group.position, origin).setY(0);
+      const d = to.length();
+      if (d > range + (e.radius || 0)) continue;
+      if (d > .001) to.normalize();
+      const ang = Math.acos(clamp(to.dot(fwd), -1, 1));
+      if (ang > arc / 2) continue;
+      const crit = this.rollCrit();
+      const dmg = Math.round(this.magicBase() * mult * (crit ? 1.7 : 1) * rand(.94, 1.06));
+      e.takeDamage(dmg, {
+        type: element, crit, from: this.pos,
+        ...extra,
+        effect: (ep) => this.effects.hitSpark(ep, extra.color || 0xfff0c0, crit),
+      });
+      hits++;
+    }
+    if (hits) { G.hitStop = Math.max(G.hitStop || 0, .03); this.shake(.14, 2.6); }
+    return hits;
+  }
+
+  lineDamage(start, end, width, mult, element, extra = {}) {
+    const ab = new THREE.Vector3().subVectors(end, start).setY(0);
+    const len2 = Math.max(.0001, ab.lengthSq());
+    let hits = 0;
+    for (const e of G.enemies) {
+      if (e.dead) continue;
+      const ap = new THREE.Vector3().subVectors(e.group.position, start).setY(0);
+      const t = clamp(ap.dot(ab) / len2, 0, 1);
+      const closest = start.clone().addScaledVector(ab, t);
+      const d = closest.distanceTo(e.group.position);
+      if (d > width / 2 + (e.radius || 0)) continue;
+      const crit = this.rollCrit();
+      const dmg = Math.round(this.magicBase() * mult * (crit ? 1.7 : 1) * rand(.94, 1.06));
+      e.takeDamage(dmg, {
+        type: element, crit, from: this.pos,
+        ...extra,
+        effect: (ep) => this.effects.hitSpark(ep, extra.color || 0xfff0c0, crit),
+      });
+      hits++;
+    }
+    if (hits) { G.hitStop = Math.max(G.hitStop || 0, .04); this.shake(.18, 3.4); }
+    return hits;
+  }
+
+  resolveCast(element, spell) {
+    if (!spell) return;
+    const from = this.handWorldPos();
+    const target = this.castTarget && !this.castTarget.dead ? this.castTarget : null;
+    const targetPos = () => target && !target.dead
+      ? target.group.position.clone().add(new THREE.Vector3(0, (target.headHeight || 1.2) * .55, 0))
+      : this.castAimPos.clone().add(new THREE.Vector3(0, .8, 0));
+    const aim = this.castAimPos.clone();
+    const groundAim = new THREE.Vector3(aim.x, this.groundYposAt(aim.x, aim.z) + .12, aim.z);
+    const status = this.spellStatus(spell);
+    const color = spell.color || 0xffffff;
+    this.castCounts[element] = (this.castCounts[element] || 0) + 1;
+    const kind = spell.kind;
+
+    if (kind === 'projectile') {
+      if (spell.pierce) this.lineDamage(from, targetPos(), 1.7, spell.dmg * .8, element, { ...status, knockback: 2.5 });
+      const onHit = (p) => {
+        this.areaDamage(p, spell.radius || 1.8, spell.dmg * (spell.pierce ? .62 : 1), element, status);
+        this.effects.explosion(p, color, .65 + (spell.scale || 1) * .35);
+        if (G.audio) G.audio.sfx('explosion');
+      };
+      if (element === 'fire') this.effects.fireball(from, targetPos, { color, scale: .8 + (spell.scale || 1) * .35, speed: spell.speed || 20, onHit });
+      else if (element === 'ice') this.effects.iceShard(from, targetPos, { onHit });
+      else if (element === 'bolt') this.effects.boltOrb(from, targetPos, { color, speed: spell.speed || 30, onHit: (p) => { this.effects.lightning(p, {}); onHit(p); } });
+      else this.effects.windBlade(from, targetPos, { color, speed: spell.speed || 26, onHit });
+      this.effects.particles(from, color, { count: 12, speed: 2.4, size: .12, life: .35, gravity: 0, up: .6, spread: .4 });
+    } else if (kind === 'cone') {
+      const yaw = target ? Math.atan2(target.group.position.x - this.pos.x, target.group.position.z - this.pos.z) : this.group.rotation.y;
+      this.coneDamage(this.pos, yaw, spell.range || 6, spell.arc || 2.2, spell.dmg, element, { ...status, knockback: spell.knockback || 2 });
+      this.effects.gust(this.pos.clone().setY(this.groundYpos() + .35), yaw, spell.range || 6, color);
+      const mid = this.pos.clone().addScaledVector(new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw)), (spell.range || 6) * .45);
+      mid.y = this.groundYposAt(mid.x, mid.z) + 1;
+      this.effects.particles(mid, color, { count: 26, speed: 5, size: .15, life: .55, gravity: 1, up: .5, spread: 1.2 });
+      if (G.audio) G.audio.sfx(element === 'ice' ? 'freeze' : element === 'wind' ? 'windHit' : 'fireCast');
+    } else if (kind === 'nova') {
+      const pos = this.pos.clone().setY(this.groundYpos() + .1);
+      this.areaDamage(pos, spell.radius || 4, spell.dmg, element, status);
+      if (element === 'ice') this.effects.frostNova(pos, spell.radius || 4.8, color);
+      else {
+        this.effects.shockwave(pos, color, spell.radius || 4.5, .55);
+        this.effects.ring(pos, color, .5, spell.radius || 4.5, .5, true);
+        this.effects.particles(pos.clone().setY(pos.y + .8), color, { count: 40, speed: (spell.radius || 4.5) * 1.2, size: .16, life: .7, gravity: 2, up: .8, spread: 1.3 });
+      }
+      this.shake(.22, 4);
+      if (G.audio) G.audio.sfx(element === 'bolt' ? 'slam' : element === 'wind' ? 'windHit' : 'explosion');
+    } else if (kind === 'rain') {
+      if (element === 'bolt' && spell.strikes) {
+        for (let i = 0; i < spell.strikes; i++) {
+          const p = groundAim.clone().add(new THREE.Vector3(rand(-spell.radius, spell.radius) * .7, 0, rand(-spell.radius, spell.radius) * .7));
+          this.pendingStrikes.push({ t: .28 + i * .2, pos: p, radius: 2.3, dmg: spell.dmg * .72, element, status: { ...status, stun: spell.stun } });
+        }
+        this.effects.magicCircle(groundAim, 'bolt', spell.radius, 1.1);
+      } else {
+        this.effects.meteorStrike(groundAim, spell.radius || 3.8, color, (p) => {
+          this.areaDamage(p, spell.radius || 3.8, spell.dmg, element, status);
+          if (G.audio) G.audio.sfx('meteor');
+        });
+        if (G.audio) G.audio.sfx('fireCharge');
+      }
+    } else if (kind === 'target') {
+      if (element === 'ice') {
+        const p = target ? target.group.position.clone() : groundAim;
+        this.areaDamage(p, target ? 1.9 : 2.4, spell.dmg, element, { ...status, freeze: spell.freeze || 3 });
+        if (target) this.effects.freezeShell(target, spell.freeze || 3);
+        this.effects.magicCircle(p.clone().setY(this.groundYposAt(p.x, p.z) + .1), 'ice', 2.6, .7);
+        if (G.audio) G.audio.sfx('freeze');
+      } else if (element === 'wind') {
+        this.pendingVortex = { pos: groundAim.clone(), radius: spell.radius || 3.6, t: 1.35, tick: 0, dmg: spell.dmg * .38, color };
+        this.effects.cyclone(groundAim, spell.radius || 3.6, color, 1.35);
+        if (G.audio) G.audio.sfx('windHit');
+      } else {
+        const p = target ? target.group.position.clone() : groundAim;
+        this.effects.lightning(p, {});
+        this.areaDamage(p, spell.radius || 1.7, spell.dmg, element, status);
+        if (G.audio) G.audio.sfx('castBolt');
+      }
+    } else if (kind === 'chain') {
+      const points = [from.clone()];
+      let current = target ? target.group.position.clone() : groundAim.clone();
+      const hitSet = new Set();
+      for (let j = 0; j < (spell.jumps || 3); j++) {
+        let best = null, bd = j === 0 ? (spell.radius || 6) : 6.5;
+        for (const e of G.enemies) {
+          if (e.dead || hitSet.has(e)) continue;
+          const d = e.group.position.distanceTo(current);
+          if (d < bd) { bd = d; best = e; }
+        }
+        if (!best) break;
+        hitSet.add(best);
+        current = best.group.position.clone().add(new THREE.Vector3(0, (best.headHeight || 1.2) * .55, 0));
+        points.push(current.clone());
+      }
+      if (points.length > 1) {
+        this.effects.chainLightning(points, color);
+        for (const e of hitSet) {
+          const crit = this.rollCrit();
+          const dmg = Math.round(this.magicBase() * spell.dmg * (crit ? 1.7 : 1) * rand(.95, 1.05));
+          e.takeDamage(dmg, { type: element, crit, from: this.pos, stun: spell.stun, knockback: 1.5, effect: (ep) => this.effects.hitSpark(ep, color, crit) });
+        }
+        G.hitStop = Math.max(G.hitStop || 0, .05);
+        if (G.audio) G.audio.sfx('castBolt');
+      } else {
+        this.effects.lightning(groundAim, {});
+      }
+    } else if (kind === 'beam') {
+      const dir = new THREE.Vector3().subVectors(target ? target.group.position : groundAim, this.pos).setY(0);
+      if (dir.lengthSq() < .01) dir.set(Math.sin(this.group.rotation.y), 0, Math.cos(this.group.rotation.y));
+      dir.normalize();
+      const end = this.pos.clone().addScaledVector(dir, spell.range || 18);
+      end.y = this.groundYposAt(end.x, end.z) + 1;
+      this.effects.chainLightning([from.clone(), end], color);
+      this.lineDamage(this.pos, end, spell.width || 1.9, spell.dmg, element, status);
+      this.effects.particles(end, color, { count: 18, speed: 4, size: .15, life: .5, gravity: 2, up: .8 });
+      if (G.audio) G.audio.sfx('castBolt');
+      this.shake(.18, 3);
+    } else if (kind === 'dash') {
+      const input = this.moveInput();
+      const dir = input.lengthSq() > .1 ? input.normalize() : this.getFacingDir();
+      const start = this.pos.clone();
+      const end = start.clone().addScaledVector(dir, spell.distance || 6);
+      this.lineDamage(start, end, 2.4, spell.dmg, element, { ...status, knockback: 5 });
+      for (let i = 0; i < 5; i++) this.effects.afterimage(start.clone().lerp(end, i / 4), this.group.rotation.y, color);
+      this.group.position.copy(end);
+      this.group.position.y = this.groundYposAt(end.x, end.z);
+      this.resolveCollisions();
+      this.invuln = Math.max(this.invuln, spell.invuln || .3);
+      this.effects.gust(end.clone().setY(this.group.position.y + .3), this.group.rotation.y, 3, color);
+      if (G.audio) G.audio.sfx('dodge');
+    }
+
+    if (G.ui) G.ui.flashSkill(element);
   }
 
   updatePending(dt) {
-    if (this.pendingBolt) {
-      this.pendingBolt.t -= dt;
-      if (this.pendingBolt.t <= 0) {
-        const { pos, power } = this.pendingBolt;
-        this.pendingBolt = null;
-        this.effects.lightning(pos, {});
-        const radius = 3.6;
-        for (const e of G.enemies) {
-          if (e.dead) continue;
-          const d = e.group.position.distanceTo(pos);
-          if (d < radius + (e.radius || 0)) {
-            const crit = this.rollCrit();
-            const dmg = Math.round(this.magicBase() * 1.6 * power * (crit ? 1.8 : 1));
-            e.takeDamage(dmg, { type: 'bolt', crit, from: this.pos, knockback: 4, effect: (ep) => this.effects.hitSpark(ep, 0xffe86a, crit) });
-          }
-        }
-        G.hitStop = Math.max(G.hitStop || 0, .07);
+    if (this.pendingStrikes && this.pendingStrikes.length) {
+      for (let i = this.pendingStrikes.length - 1; i >= 0; i--) {
+        const s = this.pendingStrikes[i];
+        s.t -= dt;
+        if (s.t > 0) continue;
+        this.pendingStrikes.splice(i, 1);
+        this.effects.lightning(s.pos, {});
+        this.areaDamage(s.pos, s.radius, s.dmg, s.element, s.status || {});
+        if (G.audio) G.audio.sfx('slam');
       }
+    }
+    if (this.pendingVortex) {
+      const v = this.pendingVortex;
+      v.t -= dt; v.tick -= dt;
+      for (const e of G.enemies) {
+        if (e.dead) continue;
+        const to = new THREE.Vector3().subVectors(v.pos, e.group.position).setY(0);
+        const d = to.length();
+        if (d < v.radius + 2.2 && d > .2) {
+          e.group.position.addScaledVector(to.normalize(), Math.min(4.5, d) * 1.7 * dt);
+          if (e.attack) e.attack = null;
+        }
+      }
+      if (v.tick <= 0) {
+        v.tick = .34;
+        this.areaDamage(v.pos, v.radius, v.dmg, 'wind', { slow: 1.4, knockback: 0, color: v.color });
+        this.effects.particles(v.pos.clone().setY(v.pos.y + .8), v.color || 0xa8f0d0, { count: 8, speed: 2, size: .14, life: .4, gravity: .5, up: .6, spread: 1 });
+      }
+      if (v.t <= 0) this.pendingVortex = null;
     }
   }
 
@@ -1335,7 +1587,7 @@ export class Player {
     this.model.rotation.x = damp(this.model.rotation.x, modelRX, 12, dt);
     // gem pulse
     if (rig.pendant) rig.pendant.rotation.y += dt * 1.4;
-    if (this.bookGlow) this.bookGlow.material.opacity = .25 + Math.sin(t * 2.4) * .1 + (a && a.name === 'cast' ? .5 : 0);
+    if (this.bookGlow) this.bookGlow.material.opacity = .09 + Math.sin(t * 2.4) * .035 + (a && a.name === 'cast' ? .22 : 0);
 
     // invulnerability blink
     this.group.visible = this.invuln > 0 && !this.dead ? (Math.floor(G.time * 22) % 2 === 0) : true;
@@ -1402,13 +1654,13 @@ export class Player {
         const prep = smoothstep(0, .45, p);
         lArmX = lerp(.85, 1.65, prep);
         lArmZ = lerp(.3, .05, prep);
-        this.fpBookGlow.material.opacity = .3 + prep * .7;
+        this.fpBookGlow.material.opacity = .12 + prep * .34;
         if (a.element === 'fire') rArmX = .9 - prep * .25;
         this.fpHandGlow.material.opacity = prep * .9;
         this.fpHandGlow.scale.setScalar(.3 + prep * 1.5);
       }
     } else {
-      this.fpBookGlow.material.opacity = .25 + Math.sin(t * 2) * .08;
+      this.fpBookGlow.material.opacity = .11 + Math.sin(t * 2) * .035;
       this.fpHandGlow.material.opacity = this.fireCharging ? .8 : 0;
       if (this.fireCharging) this.fpHandGlow.scale.setScalar(.6 + this.fireChargeT * 1.4);
     }

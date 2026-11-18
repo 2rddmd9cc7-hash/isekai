@@ -1,5 +1,6 @@
 import { G } from '../core/state.js';
 import { makePortrait } from '../core/utils.js';
+import { ELEMENTS, ELEMENT_ORDER, spellOf } from '../combat/spells.js';
 
 const NPC_INFO = {
   mira: { name: 'Anciã Mira', title: 'Guardiã do Cristal', cfg: { hair: '#d9d4e8', hair2: '#f2edff', eye: '#65e6d8', cloth: '#2c5a63', cloth2: '#d8b45c', accessory: 'circlet', skin: '#e2b58e', bg1: '#1d4250' } },
@@ -384,6 +385,65 @@ export class QuestSystem {
       { text: 'Os portões do Castelo de Aetheria estão selados. O cristal no alto da torre dorme, e o capitão não abre as portas sem a luz dele.' },
       { text: 'Se você realmente é o viajante de que Mira fala… talvez seja você quem vai reacender aquele cristal. Até lá, ninguém entra.', choices: [{ label: 'Entendido', action: () => {} }] },
     ]);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  Castle seal — verifies which magic the player currently controls  */
+  /* ------------------------------------------------------------------ */
+  inspectCastleSeal() {
+    const p = G.player;
+    if (!p || !G.ui) return;
+    const element = p.element || 'fire';
+    const info = ELEMENTS[element] || ELEMENTS.fire;
+    const spell = p.currentSpell ? p.currentSpell() : spellOf(element, 0);
+    const counts = p.castCounts || {};
+    const used = ELEMENT_ORDER.filter(k => (counts[k] || 0) > 0);
+    const usedLabel = used.length ? used.map(k => `${ELEMENTS[k].icon} ${ELEMENTS[k].name}`).join(' · ') : 'nenhum elemento conjurado ainda';
+    const verified = !!G.flags.castleSealVerified;
+    const castLabel = spell.cast > .05 ? `${spell.cast.toFixed(2)}s` : 'instantânea';
+    const nodes = [
+      { text: 'O selo de pedra do Castelo de Aetheria pulsa quando você se aproxima. Runas antigas sobem do chão e leem a marca em sua mão esquerda.' },
+      { text: `Magia ativa: <b>${info.icon} ${spell.name}</b> — ${info.name}.<br>Custo: <b>${spell.cost} mana</b> · Conjuração: <b>${castLabel}</b> · Recarga: <b>${spell.cd}s</b>.<br><span style="opacity:.75">${spell.desc}</span>` },
+      { text: `Elementos já conjurados: <b>${usedLabel}</b>.<br>${verified ? 'O selo reconhece sua assinatura e repousa.' : 'Conjure ao menos uma magia de cada elemento e retorne para que o selo confirme seu domínio.'}` },
+      { text: 'Escolha a sintonia que deseja apresentar ao selo:', choices: [
+        ...ELEMENT_ORDER.map(k => ({
+          label: `${ELEMENTS[k].icon} ${ELEMENTS[k].name}`,
+          action: () => { p.selectElement(k); this.toast(`Sintonia: ${ELEMENTS[k].name} · ${p.currentSpell().name}`, 'good'); },
+        })),
+        { label: 'Verificar meu domínio', action: () => this.verifyCastleSeal() },
+      ] },
+    ];
+    G.ui.openDialogue({
+      name: 'Selo do Castelo',
+      title: 'Guardião de Aetheria',
+      portrait: this.portraits.mira,
+      nodes,
+      onClose: () => this.refresh(),
+    });
+  }
+
+  verifyCastleSeal() {
+    const p = G.player;
+    if (!p) return;
+    const counts = p.castCounts || {};
+    const used = ELEMENT_ORDER.filter(k => (counts[k] || 0) > 0);
+    if (used.length >= ELEMENT_ORDER.length) {
+      if (!G.flags.castleSealVerified) {
+        G.flags.castleSealVerified = true;
+        p.addXP(120);
+        p.addGold(80);
+        p.potions += 1;
+        if (G.audio) G.audio.sfx('quest');
+        if (G.effects) G.effects.levelUp(p.pos.clone());
+        if (G.ui) G.ui.toast('Selo do Castelo: domínio elemental confirmado! +120 XP, +80 ouro, +1 poção', 'gold');
+      } else if (G.ui) {
+        G.ui.toast('O selo já reconhece seu domínio elemental.', 'good');
+      }
+      return;
+    }
+    const missing = ELEMENT_ORDER.filter(k => !(counts[k] > 0)).map(k => ELEMENTS[k].name).join(', ');
+    if (G.ui) G.ui.toast(`O selo ainda não sente: ${missing}.`, 'warn');
+    if (G.audio) G.audio.sfx('error');
   }
 
   /* ------------------------------------------------------------------ */

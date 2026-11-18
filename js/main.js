@@ -315,6 +315,8 @@ function setupInput() {
     if (k === '1') { player.magicDown('fire'); return; }
     if (k === '2') { player.magicDown('bolt'); return; }
     if (k === '3') { player.magicDown('ice'); return; }
+    if (k === '4') { player.magicDown('wind'); return; }
+    if (k === 'r') { player.cycleSpell(1); return; }
   });
 
   window.addEventListener('keyup', e => {
@@ -391,7 +393,9 @@ function setupInput() {
 function lookBy(dx, dy) {
   if (!player) return;
   if (player.firstPerson) {
-    player.viewYaw += dx * 0.0026;
+    // mouse right must turn the view right. With our +Z-facing basis that
+    // means decreasing yaw (Three.js Y-rotation is counter-clockwise).
+    player.viewYaw -= dx * 0.0026;
     player.viewPitch = clamp(player.viewPitch - dy * 0.0022, -1.15, 1.15);
     player.facing = player.viewYaw;
     player.lastDrag = G.time;
@@ -433,6 +437,14 @@ function findInteractable() {
     const d = Math.hypot(a.x - p.x, a.z - p.z);
     if (d < 4.3 && !a.active) {
       candidates.push({ d, label: `Despertar ${a.name}`, run: () => world.activateAltar(id) });
+    }
+  }
+
+  if (world.castleSeal) {
+    const s = world.castleSeal;
+    const d = Math.hypot(s.x - p.x, s.z - p.z);
+    if (d < (s.radius || 4.6)) {
+      candidates.push({ d, label: 'Examinar o Selo do Castelo', run: () => quests.inspectCastleSeal() });
     }
   }
 
@@ -509,6 +521,7 @@ function setupMobile() {
       else if (m === 'fire') player.magicDown('fire');
       else if (m === 'bolt') player.magicDown('bolt');
       else if (m === 'ice') player.magicDown('ice');
+      else if (m === 'wind') player.magicDown('wind');
       else if (m === 'dodge') player.dodge();
       else if (m === 'interact') interact();
       else if (m === 'heal') player.usePotion();
@@ -550,6 +563,12 @@ function bindGameplayExtras() {
   };
 }
 
+function reportError(scope, err) {
+  G.errors = (G.errors || 0) + 1;
+  G.lastError = `${scope}: ${err && err.message ? err.message : err}`;
+  if (G.errors <= 8) console.warn(`[Aetheria] ${G.lastError}`);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Main loop                                                         */
 /* ------------------------------------------------------------------ */
@@ -586,20 +605,22 @@ function animate() {
     if (frozen) G.hitStop = Math.max(0, G.hitStop - dt);
     const step = frozen ? dt * 0.16 : dt;
 
-    player.update(step);
-    player.tickPending(step);
-    world.update(step);
+    try { player.update(step); } catch (err) { reportError('player', err); }
+    try { player.tickPending(step); } catch (err) { reportError('pending', err); }
+    try { world.update(step); } catch (err) { reportError('world', err); }
 
     const list = G.enemies;
-    for (let i = 0; i < list.length; i++) list[i].update(step);
+    for (let i = 0; i < list.length; i++) {
+      try { list[i].update(step); } catch (err) { reportError('enemy', err); }
+    }
 
-    effects.update(step);
-    updateInteractions();
+    try { effects.update(step); } catch (err) { reportError('effects', err); }
+    try { updateInteractions(); } catch (err) { reportError('interactions', err); }
     updateSunTarget();
 
     if (G.time - lastHudPulse > 0.05) {
       lastHudPulse = G.time;
-      ui.update(dt);
+      try { ui.update(dt); } catch (err) { reportError('ui', err); }
     }
     updateProximityAudio();
     audio.update(dt);

@@ -62,6 +62,8 @@ export class Enemy {
     this.aggro = false;
     this.frozen = false;
     this.freezeT = 0;
+    this.slowT = 0; this.slowFactor = 1;
+    this.stunT = 0;
     this.burnT = 0; this.burnDmg = 0;
     this.attack = null;
     this.cd = rand(.4, 1.2);
@@ -371,6 +373,8 @@ export class Enemy {
     this.updateFlash(dt);
     this.frozen = this.freezeT > 0;
     if (this.freezeT > 0) this.freezeT -= dt;
+    if (this.slowT > 0) this.slowT -= dt;
+    if (this.stunT > 0) this.stunT -= dt;
     if (this.burnT > 0) {
       this.burnT -= dt;
       this.burnAcc = (this.burnAcc || 0) + dt;
@@ -395,6 +399,11 @@ export class Enemy {
       this.attack = null;
       this.updateRig(dt); this.updateBar(); this.updateFacing(dt, false); return;
     }
+    if (this.stunT > 0) {
+      this.attack = null;
+      this.vel.multiplyScalar(.86);
+      this.updateRig(dt); this.updateBar(); return;
+    }
     this.alertT = Math.max(0, this.alertT - dt);
     this.alert.visible = this.alertT > 0;
 
@@ -408,7 +417,7 @@ export class Enemy {
     const toward = new THREE.Vector3().subVectors(p, this.group.position).setY(0);
     const flatDist = toward.length();
     let move = new THREE.Vector3();
-    const speed = this.cfg.speed * (this.enraged ? 1.28 : 1);
+    const speed = this.cfg.speed * (this.enraged ? 1.28 : 1) * (this.slowT > 0 ? this.slowFactor : 1);
     const u = this.cfg.uniform;
 
     if (u === 'archer') {
@@ -726,6 +735,15 @@ export class Enemy {
       this.effects.particles(this.center, 0x9ff0ff, { count: 12, speed: 1.5, size: .15, life: .6, gravity: 1 });
     }
     if (opts.burn) { this.burnT = opts.burn; this.burnDmg = Math.round(dmg * .18); }
+    if (opts.slow) {
+      this.slowT = Math.max(this.slowT, opts.slow);
+      this.slowFactor = this.isBoss ? .8 : Math.min(this.slowFactor, opts.slowAmount ?? .55);
+    }
+    if (opts.stun) {
+      const stun = this.isBoss ? Math.min(.45, opts.stun * .4) : opts.stun;
+      this.stunT = Math.max(this.stunT, stun);
+      this.attack = null;
+    }
     if (opts.knockback) {
       const dir = opts.from ? new THREE.Vector3().subVectors(this.group.position, opts.from).setY(0).normalize() : new THREE.Vector3(rand(-1, 1), 0, rand(-1, 1)).normalize();
       this.vel.addScaledVector(dir, opts.knockback);
