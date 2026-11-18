@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Aetheria — Crônicas do Cristal</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%238ff8ff'/%3E%3Cstop offset='1' stop-color='%232f6f78'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='%230d1a24'/%3E%3Cpath d='M32 8 L48 32 L32 56 L16 32 Z' fill='url(%23g)' stroke='%23ffe7a0' stroke-width='2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
+</head>
+<body>
+<div id="app">
+  <div id="viewport"></div>
+  <div id="grade"></div>
+  <div id="vignette"></div>
+  <div id="flash"></div>
+
+  <div id="hud" class="hidden">
+    <!-- top left: portrait + vitals -->
+    <div id="vit">
+      <div class="portrait-wrap">
+        <div class="portrait-ring"></div>
+        <canvas id="portrait" width="128" height="128"></canvas>
+        <div id="levelBadge">1</div>
+      </div>
+      <div class="vitals">
+        <div class="char-line"><span id="charName">Kael</span><span id="charTitle">Viajante do Cristal</span></div>
+        <div class="vbar hp"><div id="hpFill" class="fill"></div><span id="hpText">100 / 100</span></div>
+        <div class="vbar mp"><div id="mpFill" class="fill"></div><span id="mpText">80 / 80</span></div>
+        <div class="vbar st"><div id="stFill" class="fill"></div></div>
+      </div>
+    </div>
+
+    <!-- top center compass -->
+    <div id="compassWrap">
+      <div id="compassBar"></div>
+      <div id="zoneTitle">Vila de Brisa</div>
+    </div>
+
+    <!-- top right minimap -->
+    <div id="mapWrap">
+      <canvas id="minimap" width="188" height="188"></canvas>
+      <div class="map-ring"></div>
+      <div id="goldLine"><span class="coin">✦</span><span id="goldText">120</span><span class="sep"></span><span id="potionText">Poções 3</span></div>
+    </div>
+
+    <div id="questTracker">
+      <div class="q-head"><span class="q-diamond">◆</span><span id="questTitle">Ecos de Aetheria</span></div>
+      <div id="questObjectives"></div>
+    </div>
+
+    <div id="bossBar" class="hidden">
+      <div class="boss-head"><span id="bossName">Grimmjaw</span><span id="bossPhase">Senhor do Acampamento</span></div>
+      <div class="boss-track"><div id="bossFill"></div><div id="bossGhost"></div></div>
+    </div>
+
+    <div id="enemyBars"></div>
+
+    <div id="skillbar">
+      <div class="skill" data-skill="sword" title="Espada — clique para atacar, segure para carregar">
+        <div class="sk-icon">⚔</div><div class="sk-key">LMB</div><div class="sk-cd"></div>
+      </div>
+      <div class="skill" data-skill="fire" title="Fogo — 1">
+        <div class="sk-icon fire">🔥</div><div class="sk-key">1</div><div class="sk-cd"></div>
+      </div>
+      <div class="skill" data-skill="bolt" title="Raio — 2">
+        <div class="sk-icon bolt">⚡</div><div class="sk-key">2</div><div class="sk-cd"></div>
+      </div>
+      <div class="skill" data-skill="ice" title="Gelo — 3">
+        <div class="sk-icon ice">❄</div><div class="sk-key">3</div><div class="sk-cd"></div>
+      </div>
+      <div class="skill small" data-skill="dodge" title="Esquiva — Q">
+        <div class="sk-icon">💨</div><div class="sk-key">Q</div><div class="sk-cd"></div>
+      </div>
+      <div class="skill small" data-skill="heal" title="Poção — H">
+        <div class="sk-icon">🧪</div><div class="sk-key">H</div><div class="sk-cd"></div>
+      </div>
+    </div>
+
+    <div id="interactPrompt" class="hidden"><span class="key">E</span><span id="interactText">Falar</span></div>
+    <div id="lockHint" class="hidden">Alvo travado · <span class="key">TAB</span> solta</div>
+    <div id="toast"></div>
+    <div id="subtitle"></div>
+    <div id="crosshair" class="hidden"><div class="ch-dot"></div><div class="ch-ring"></div></div>
+    <div id="damageLayer"></div>
+    <div id="hintBar"><span><b>WASD</b> mover</span><span><b>Shift</b> correr</span><span><b>Espaço</b> saltar</span><span><b>Q</b> esquivar</span><span><b>E</b> interagir</span><span><b>V</b> 1ª pessoa</span><span><b>TAB</b> mirar</span><span><b>M</b> mapa</span></div>
+  </div>
+
+  <div id="dialogue" class="hidden">
+    <div class="dlg-portrait"><canvas id="dlgPortrait" width="160" height="160"></canvas></div>
+    <div class="dlg-body">
+      <div class="dlg-name" id="dlgName">Mira</div>
+      <div class="dlg-text" id="dlgText"></div>
+      <div class="dlg-choices" id="dlgChoices"></div>
+      <div class="dlg-next">E · continuar</div>
+    </div>
+  </div>
+
+  <div id="shopPanel" class="panel hidden">
+    <div class="panel-inner">
+      <div class="panel-head"><h2 id="shopTitle">Forja de Brann</h2><button class="closeBtn" data-close>✕</button></div>
+      <div class="shop-gold">✦ <span id="shopGold">120</span> ouro</div>
+      <div id="shopItems"></div>
+      <div class="panel-foot" id="shopFoot">Melhorias permanentes. Escolha com sabedoria.</div>
+    </div>
+  </div>
+
+  <div id="mapPanel" class="panel hidden">
+    <div class="panel-inner wide">
+      <div class="panel-head"><h2>Mapa de Aetheria</h2><button class="closeBtn" data-close>✕</button></div>
+      <canvas id="bigmap" width="900" height="620"></canvas>
+      <div class="panel-foot">◆ Objetivo atual · ⚑ Pontos de interesse · ☠ Perigo</div>
+    </div>
+  </div>
+
+  <div id="pausePanel" class="panel hidden">
+    <div class="panel-inner narrow">
+      <div class="panel-head"><h2>Pausa</h2><button class="closeBtn" data-close>✕</button></div>
+      <div class="pause-buttons">
+        <button id="resumeBtn" class="bigBtn">Continuar</button>
+        <button id="helpBtn" class="ghostBtn">Como jogar</button>
+        <button id="muteBtn" class="ghostBtn">Som: ligado</button>
+        <button id="restartBtn" class="ghostBtn">Recomeçar jornada</button>
+      </div>
+      <div id="helpText" class="help-text hidden">
+        <p><b>Explorar</b> — WASD, Shift para correr, Espaço para saltar, V alterna 1ª/3ª pessoa.</p>
+        <p><b>Combate</b> — Clique esquerdo faz um combo de 3 golpes; segure para o Corte Carregado. Q esquiva (invencível por um instante). Tab trava no inimigo mais próximo.</p>
+        <p><b>Magia</b> — 1 Fogo (segure para carregar), 2 Raio (instantâneo em área), 3 Gelo (congela). Cada elemento tem um efeito próprio.</p>
+        <p><b>Jornada</b> — E fala e interage. H usa poção. M abre o mapa. Complete as missões com Mira, Brann, Lys e Tuli.</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="ending" class="hidden">
+    <div class="ending-inner">
+      <div class="ending-kicker">AETHERIA</div>
+      <h1 id="endingTitle">O Cristal Desperta</h1>
+      <p id="endingText">Grimmjaw caiu. O acampamento goblin se dispersa e a luz retorna às ruínas.</p>
+      <div class="ending-stats" id="endingStats"></div>
+      <button id="againBtn" class="bigBtn">Jogar novamente</button>
+    </div>
+  </div>
+
+  <div id="mobile" class="hidden">
+    <div id="stick"><div id="stickKnob"></div></div>
+    <div class="mbtns">
+      <button class="mbtn" data-m="fire">🔥</button>
+      <button class="mbtn" data-m="bolt">⚡</button>
+      <button class="mbtn" data-m="ice">❄</button>
+      <button class="mbtn attack" data-m="attack">⚔</button>
+      <button class="mbtn" data-m="dodge">💨</button>
+      <button class="mbtn" data-m="interact">E</button>
+      <button class="mbtn" data-m="heal">🧪</button>
+    </div>
+  </div>
+</div>
+
+<div id="loading">
+  <div class="load-brand">AETHERIA</div>
+  <div class="load-sub">Crônicas do Cristal</div>
+  <div class="load-track"><div id="loadFill"></div></div>
+  <div class="load-tip" id="loadTip">Pintando os céus de Aetheria…</div>
+</div>
+
+<div id="start">
+  <div class="start-bg"></div>
+  <div class="start-inner">
+    <div class="crest">✦</div>
+    <div class="start-kicker">UM RPG DE FANTASIA ANIME</div>
+    <h1>AETHERIA</h1>
+    <div class="start-sub">CRÔNICAS DO CRISTAL</div>
+    <p class="start-desc">O cristal que sustenta o reino está se apagando. Goblins descem das colinas e algo antigo desperta sob as ruínas. Pegue sua lâmina, desperte os elementos e atravesse as Terras de Brisa.</p>
+    <button id="startBtn" class="start-btn">Iniciar Jornada</button>
+    <div class="start-controls">
+      <span><b>WASD</b> mover</span><span><b>LMB</b> atacar</span><span><b>1 2 3</b> magias</span><span><b>Q</b> esquivar</span><span><b>E</b> interagir</span><span><b>V</b> 1ª pessoa</span>
+    </div>
+    <div class="start-note">Better with sound · use fones para a experiência completa</div>
+  </div>
+</div>
+
+<script type="module" src="./js/main.js"></script>
+</body>
+</html>
